@@ -185,7 +185,13 @@ class MainActivity : ComponentActivity() {
     @SuppressLint("UnspecifiedRegisterReceiverFlag")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        
+        // ═══════════════════════════════════════════════════════════════
+        // INIT MANAGERS - MUST BE CALLED BEFORE ANYTHING ELSE
+        // ═══════════════════════════════════════════════════════════════
         SystemPromptManager.init(applicationContext)
+        ChatSummaryManager.init(applicationContext)  // ← NEW: Initialize Chat Summary Manager
+        
         WindowCompat.setDecorFitsSystemWindows(window, false)
         selectedEndpoint = prefs.getString(PREF_ENDPOINT, PRESET_ENDPOINTS[0]) ?: PRESET_ENDPOINTS[0]
         customEndpoint   = prefs.getString(PREF_CUSTOM_ENDPOINT, "") ?: ""
