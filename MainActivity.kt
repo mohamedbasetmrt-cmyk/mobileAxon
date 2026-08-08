@@ -249,6 +249,7 @@ class MainActivity : ComponentActivity() {
             var errorLogContent  by remember { mutableStateOf("") }
             var showErrorLog     by remember { mutableStateOf(false) }
             var showDiagnostics  by remember { mutableStateOf(false) }
+            var showDevDashboard by remember { mutableStateOf(false) }
 
             BackHandler(enabled = showErrorLog) {
                 showErrorLog = false
@@ -274,6 +275,10 @@ class MainActivity : ComponentActivity() {
                         .safeDrawingPadding()
                 ) {
                     when {
+                        showDevDashboard -> DevDashboardScreen(
+                            onClose = { showDevDashboard = false }
+                        )
+                        
                         showErrorLog -> ErrorLogScreen(
                             logContent = errorLogContent,
                             logPath = errorLogPath,
@@ -284,7 +289,8 @@ class MainActivity : ComponentActivity() {
                                     showErrorLog = false
                                     Toast.makeText(applicationContext, "✅ Log cleared", Toast.LENGTH_SHORT).show()
                                 }
-                            }
+                            },
+                            onOpenDevDashboard = { showDevDashboard = true }
                         )
 
                         currentScreen == Screen.CHAT -> ChatScreen(
@@ -3187,7 +3193,8 @@ fun ErrorLogScreen(
     logContent: String,
     logPath:    String,
     onClose:    () -> Unit,
-    onClear:    () -> Unit
+    onClear:    () -> Unit,
+    onOpenDevDashboard: () -> Unit = {}
 ) {
     Column(modifier = Modifier.fillMaxSize().background(BgPrimary).padding(16.dp)) {
         Row(
@@ -3204,6 +3211,19 @@ fun ErrorLogScreen(
                 fontFamily    = AppFontFamily
             )
             Row {
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(NeonCyan.copy(0.1f))
+                        .border(0.5.dp, NeonCyan.copy(0.4f), RoundedCornerShape(4.dp))
+                        .clickable { onOpenDevDashboard() }
+                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                ) {
+                    Text("DEV STATS", fontSize = 9.sp, color = NeonCyan,
+                        letterSpacing = 1.sp,
+                        fontFamily = AppFontFamily)
+                }
+                Spacer(Modifier.width(8.dp))
                 Box(
                     modifier = Modifier
                         .clip(RoundedCornerShape(4.dp))
@@ -3254,5 +3274,218 @@ fun ErrorLogScreen(
                 modifier   = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(12.dp)
             )
         }
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+//  DEV DASHBOARD SCREEN - ServiceStatsTracker Viewer
+// ══════════════════════════════════════════════════════════════════════
+
+@Composable
+fun DevDashboardScreen(onClose: () -> Unit) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(BgPrimary)
+            .padding(16.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                "// DEV DASHBOARD",
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Bold,
+                color = TextPrimary,
+                letterSpacing = 3.sp,
+                fontFamily = AppFontFamily
+            )
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(NeonCyan.copy(0.1f))
+                    .border(0.5.dp, NeonCyan.copy(0.4f), RoundedCornerShape(4.dp))
+                    .clickable { onClose() }
+                    .padding(horizontal = 12.dp, vertical = 6.dp)
+            ) {
+                Text("CLOSE", fontSize = 9.sp, color = NeonCyan,
+                    letterSpacing = 1.sp,
+                    fontFamily = AppFontFamily)
+            }
+        }
+
+        // Stats Overview
+        Card(
+            modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp),
+            colors = CardDefaults.cardColors(containerColor = CardBg),
+            shape = RoundedCornerShape(8.dp)
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text("📊 SERVICE STATS", 
+                    fontSize = 14.sp, 
+                    fontWeight = FontWeight.Bold, 
+                    color = NeonCyan,
+                    fontFamily = AppFontFamily,
+                    modifier = Modifier.padding(bottom = 12.dp)
+                )
+                
+                StatRow("Online", if (ServiceStatsTracker.isOnline) "✅ Yes" else "❌ No")
+                StatRow("Query Count", "${ServiceStatsTracker.queryCount}")
+                StatRow("Avg Response", ServiceStatsTracker.avgResponseString())
+            }
+        }
+
+        // Last Prompts
+        Card(
+            modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp),
+            colors = CardDefaults.cardColors(containerColor = CardBg),
+            shape = RoundedCornerShape(8.dp)
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text("💬 LAST PROMPTS", 
+                    fontSize = 14.sp, 
+                    fontWeight = FontWeight.Bold, 
+                    color = AccentAmber,
+                    fontFamily = AppFontFamily,
+                    modifier = Modifier.padding(bottom = 12.dp)
+                )
+                
+                if (ServiceStatsTracker.lastSystemPrompt.isNotEmpty()) {
+                    Text("System:", 
+                        fontSize = 10.sp, 
+                        color = TextMuted,
+                        fontFamily = AppFontFamily
+                    )
+                    Text(ServiceStatsTracker.lastSystemPrompt.take(200) + if (ServiceStatsTracker.lastSystemPrompt.length > 200) "..." else "",
+                        fontSize = 9.sp,
+                        color = TextPrimary.copy(0.8f),
+                        fontFamily = AppFontFamily,
+                        modifier = Modifier.padding(bottom = 8.dp)
+                    )
+                }
+                
+                if (ServiceStatsTracker.lastPromptText.isNotEmpty()) {
+                    Text("User:", 
+                        fontSize = 10.sp, 
+                        color = TextMuted,
+                        fontFamily = AppFontFamily
+                    )
+                    Text(ServiceStatsTracker.lastPromptText.take(200) + if (ServiceStatsTracker.lastPromptText.length > 200) "..." else "",
+                        fontSize = 9.sp,
+                        color = TextPrimary.copy(0.8f),
+                        fontFamily = AppFontFamily
+                    )
+                }
+            }
+        }
+
+        // Tool Usage History
+        Card(
+            modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp),
+            colors = CardDefaults.cardColors(containerColor = CardBg),
+            shape = RoundedCornerShape(8.dp)
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text("🛠️ TOOL USAGE", 
+                    fontSize = 14.sp, 
+                    fontWeight = FontWeight.Bold, 
+                    color = AccentPink,
+                    fontFamily = AppFontFamily,
+                    modifier = Modifier.padding(bottom = 12.dp)
+                )
+                
+                if (ServiceStatsTracker.toolUsageHistory.isEmpty()) {
+                    Text("No tools used yet",
+                        fontSize = 10.sp,
+                        color = TextMuted,
+                        fontFamily = AppFontFamily
+                    )
+                } else {
+                    ServiceStatsTracker.toolUsageHistory.take(5).forEach { record ->
+                        val time = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault())
+                            .format(java.util.Date(record.timestamp))
+                        Text("[$time] ${record.toolName}",
+                            fontSize = 10.sp,
+                            color = TextPrimary,
+                            fontFamily = AppFontFamily
+                        )
+                        Text("  Params: ${record.parameters.take(100)}",
+                            fontSize = 8.sp,
+                            color = TextMuted,
+                            fontFamily = AppFontFamily,
+                            modifier = Modifier.padding(bottom = 4.dp)
+                        )
+                    }
+                }
+            }
+        }
+
+        // Conversation Summaries
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = CardBg),
+            shape = RoundedCornerShape(8.dp)
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text("🧠 CONVERSATION SUMMARIES", 
+                    fontSize = 14.sp, 
+                    fontWeight = FontWeight.Bold, 
+                    color = NeonGreen,
+                    fontFamily = AppFontFamily,
+                    modifier = Modifier.padding(bottom = 12.dp)
+                )
+                
+                if (ServiceStatsTracker.conversationSummaries.isEmpty()) {
+                    Text("No conversations saved yet",
+                        fontSize = 10.sp,
+                        color = TextMuted,
+                        fontFamily = AppFontFamily
+                    )
+                } else {
+                    ServiceStatsTracker.conversationSummaries.take(5).forEach { summary ->
+                        val time = java.text.SimpleDateFormat("MM/dd HH:mm", java.util.Locale.getDefault())
+                            .format(java.util.Date(summary.timestamp))
+                        Text("[$time] Session: ${summary.sessionId.take(8)}...",
+                            fontSize = 10.sp,
+                            color = TextPrimary,
+                            fontFamily = AppFontFamily
+                        )
+                        Text("  ${summary.messageCount} messages",
+                            fontSize = 8.sp,
+                            color = TextMuted,
+                            fontFamily = AppFontFamily
+                        )
+                        Text("  ${summary.summary.take(100)}${if (summary.summary.length > 100) "..." else ""}",
+                            fontSize = 9.sp,
+                            color = TextPrimary.copy(0.8f),
+                            fontFamily = AppFontFamily,
+                            modifier = Modifier.padding(bottom = 6.dp)
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun StatRow(label: String, value: String) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Text(label,
+            fontSize = 11.sp,
+            color = TextMuted,
+            fontFamily = AppFontFamily
+        )
+        Text(value,
+            fontSize = 11.sp,
+            color = TextPrimary,
+            fontWeight = FontWeight.Medium,
+            fontFamily = AppFontFamily
+        )
     }
 }
