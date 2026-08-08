@@ -20,12 +20,30 @@ class LocalLiteRTLMProvider(private val context: Context) : LlmProvider {
     private var modelState         = LocalModelState.UNLOADED
     private val scope              = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
+    // ── Conversation History ──
+    private data class HistoryMessage(
+        val role: String,
+        val text: String
+    )
+    private val messageHistory = mutableListOf<HistoryMessage>()
+    private val maxHistoryTurns = 10
+
     var onModelStateChange: ((LocalModelState) -> Unit)? = null
 
     override val isReady: Boolean
         get() = modelState == LocalModelState.LOADED && engine != null
 
     fun getModelState() = modelState
+
+    private fun trimHistory() {
+        while (messageHistory.size > maxHistoryTurns) {
+            messageHistory.removeAt(0)
+        }
+    }
+
+    fun clearHistory() {
+        messageHistory.clear()
+    }
 
     fun loadModel(
         backend:   String = "CPU",
@@ -92,12 +110,26 @@ class LocalLiteRTLMProvider(private val context: Context) : LlmProvider {
             text.ifEmpty { "Hello" }
         } catch (e: Exception) { json }
 
-        // Build prompt with system prompt ONCE only
+        // Add user message to history
+        messageHistory.add(HistoryMessage("user", prompt))
+        trimHistory()
+
+        // Build conversation with history
         val systemPrompt = SystemPromptManager.getEffectivePromptWithContext()
-        val fullPrompt = if (systemPrompt != null) {
-            "<start_of_turn>user\n$systemPrompt\n\n$prompt<end_of_turn>\n<start_of_turn>model\n"
-        } else {
-            "<start_of_turn>user\n$prompt<end_of_turn>\n<start_of_turn>model\n"
+        val fullPrompt = buildString {
+            if (systemPrompt != null) {
+                append("<start_of_turn>user\n$systemPrompt\n\n")
+            } else {
+                append("<start_of_turn>user\n")
+            }
+            
+            // Add conversation history
+            for ((idx, msg) in messageHistory.withIndex()) {
+                if (idx > 0) { // Skip first (current) user message, already added above
+                    append("<end_of_turn>\n<start_of_turn>${msg.role}\n${msg.text}")
+                }
+            }
+            append("<end_of_turn>\n<start_of_turn>model\n")
         }
 
         scope.launch {
@@ -111,13 +143,23 @@ class LocalLiteRTLMProvider(private val context: Context) : LlmProvider {
                 )
 
                 engine!!.createConversation(convConfig).use { conversation ->
+                    val responseBuilder = StringBuilder()
                     conversation.sendMessageAsync(fullPrompt)
                         .collect { message ->
                             val text = message.toString()
+                            responseBuilder.append(text)
                             if (text.isNotEmpty()) {
                                 withContext(Dispatchers.Main) { onChunk(text) }
                             }
                         }
+                    
+                    // Add assistant response to history
+                    val assistantResponse = responseBuilder.toString().trim()
+                    if (assistantResponse.isNotBlank()) {
+                        messageHistory.add(HistoryMessage("assistant", assistantResponse))
+                        trimHistory()
+                    }
+                    
                     withContext(Dispatchers.Main) { onDone() }
                 }
 
@@ -127,5 +169,8 @@ class LocalLiteRTLMProvider(private val context: Context) : LlmProvider {
         }
     }
 
-    override fun disconnect() = unloadModel()
+    override fun disconnect() {
+        unloadModel()
+        messageHistory.clear()
+    }
 }
