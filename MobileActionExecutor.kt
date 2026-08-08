@@ -85,7 +85,7 @@ class MobileActionExecutor(private val context: Context) {
         val params = actionFrame.optJSONObject("params") ?: JSONObject()
 
         Log.d(TAG, "Executing action='$action'  params=$params")
-        
+
         // ── NEW: Record tool usage in ServiceStatsTracker ──
         ServiceStatsTracker.recordToolUsage(
             toolName = action,
@@ -1453,7 +1453,7 @@ class MobileActionExecutor(private val context: Context) {
                         }
                         "done" -> {
                             val result = if (fullResponse.isNotEmpty()) fullResponse.toString().trim()
-                                else json.optString("text", "")
+                            else json.optString("text", "")
                             ws.close(1000, "Done")
                             client.dispatcher.executorService.shutdown()
                             mainHandler.post { onResult(result) }

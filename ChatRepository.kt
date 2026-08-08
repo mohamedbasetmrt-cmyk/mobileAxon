@@ -142,7 +142,7 @@ object ChatRepository {
             }
             // ترتيب الجلسات من الأحدث للأقدم
             list.sortedByDescending { it.createdAt }
-        } catch (e: Exception) { 
+        } catch (e: Exception) {
             // لو فيه خطأ، حاول ترجع الشاتات المحلية من ChatSummaryManager
             Log.w("ChatRepository", "Error fetching remote sessions: ${e.message}, falling back to local")
             ChatSummaryManager.getAllSummaries().map { summary ->

@@ -432,7 +432,7 @@ class CohereLlmProvider(private val context: Context) : LlmProvider {
             userQuestion = userText,
             maxSummaries = 3
         )
-        
+
         // Add the smart context as a system augmentation (not in history)
         val contextAugmentation = if (smartContext.isNotBlank()) {
             "\n\n--- CONTEXT FROM PAST CONVERSATIONS ---\n$smartContext\n"
@@ -451,13 +451,13 @@ class CohereLlmProvider(private val context: Context) : LlmProvider {
                 } else {
                     baseSystemPrompt
                 }
-                
+
                 // ── NEW: Record prompts in ServiceStatsTracker ──
                 ServiceStatsTracker.recordPrompts(
                     systemPrompt = systemPrompt,
-                    userPrompt = messages.joinToString("\n") { "${if(it.isUser) "User" else "Assistant"}: ${it.text}" }
+                    userPrompt = messageHistory.joinToString("\n") { "${if (it.role == "user") "User" else "Assistant"}: ${it.text}" }
                 )
-                
+
                 val messagesArray = buildMessagesArray(systemPrompt)
 
                 val allTextBuilder = StringBuilder()

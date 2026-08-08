@@ -24,13 +24,13 @@ object ServiceStatsTracker {
     var queryCount    by mutableStateOf(0)
     var avgResponseMs by mutableStateOf(0L)
     var isOnline      by mutableStateOf(false)
-    
+
     // ── NEW: Use State lists for real-time UI updates ──
     var lastSystemPrompt by mutableStateOf("")
     var lastPromptText by mutableStateOf("")
     val toolUsageHistory = mutableStateListOf<ToolUsageRecord>()
     val conversationSummaries = mutableStateListOf<ConversationSummary>()
-    
+
     private var totalResponseMs = 0L
     private var responseCount   = 0
     private var sessionStart    = 0L
@@ -55,12 +55,12 @@ object ServiceStatsTracker {
         responseCount++
         avgResponseMs = totalResponseMs / responseCount
     }
-    
+
     fun recordPrompts(systemPrompt: String, userPrompt: String) {
         lastSystemPrompt = systemPrompt
         lastPromptText = userPrompt
     }
-    
+
     fun recordToolUsage(toolName: String, parameters: String) {
         val record = ToolUsageRecord(
             timestamp = System.currentTimeMillis(),
@@ -70,7 +70,7 @@ object ServiceStatsTracker {
         toolUsageHistory.add(0, record) // Add to top
         if (toolUsageHistory.size > 20) toolUsageHistory.removeAt(20) // Keep last 20
     }
-    
+
     fun recordConversationSummary(sessionId: String, messageCount: Int, summary: String) {
         val summaryRecord = ConversationSummary(
             timestamp = System.currentTimeMillis(),

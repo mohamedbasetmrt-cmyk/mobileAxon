@@ -56,14 +56,20 @@ class LocalVoiceSession(
     private val jsonBuffer = StringBuilder()
     private var isCollectingJson = false
     private var jsonExecuted = false
-    
+
     // ── NEW: Conversation tracking for saving sessions ──
     private val conversationMessages = mutableListOf<ChatMessage>()
     private var currentSessionId: String? = null
-    
+
+    // ── NEW: Server chat sync (ChatRepository) ──
+    @Volatile private var currentServerNodeId: String? = null
+
     // ── NEW: TTS Deduplication ──
     private var lastSpokenText: String? = null
     private var ttsSpeakTime: Long = 0
+
+    // ── NEW: هل اتنطقت جمل أثناء الـ streaming (منع إعادة الرد كامل) ──
+    private var streamedAnySentence = false
 
     private fun sendTextToOrb(text: String) {
         val intent = android.content.Intent("com.example.app_abdelbaset.ORB_TEXT")
@@ -147,7 +153,7 @@ class LocalVoiceSession(
                     onUserUtterance = { text ->
                         // Add user message to conversation history
                         conversationMessages.add(ChatMessage(text = text, isUser = true))
-                        
+
                         onFinalTranscript(text)
                         startLlmStreaming(text)
                     },
@@ -181,18 +187,19 @@ class LocalVoiceSession(
     fun onWakeWordDetected() {
         if (currentState != State.IDLE) return
         Log.d(TAG, "Wake word -> starting local STT + VAD")
-        
+
         // ← NEW: Generate new session ID when starting a new session
         currentSessionId = "session_${System.currentTimeMillis()}"
+        currentServerNodeId = null
         conversationMessages.clear()
-        
+
         startLocalProcessing()
     }
 
     fun cancel() {
         // ← NEW: Save session before cancelling
         saveCurrentSession()
-        
+
         sttPulseJob?.cancel()
 //        ttsQueueJob?.cancel()
         if (useOnlineSTT) {
@@ -210,7 +217,7 @@ class LocalVoiceSession(
     fun release() {
         // ← NEW: Save session before releasing
         saveCurrentSession()
-        
+
         cancel()
         if (useOnlineSTT) deepgramEngine?.release() else sttEngine?.release()
         vadEngine?.release()
@@ -219,21 +226,56 @@ class LocalVoiceSession(
         llmProvider.disconnect()
         scope.cancel()
     }
-    
+
     /**
      * حفظ الجلسة الحالية قبل إنهائها
      */
     private fun saveCurrentSession() {
         if (conversationMessages.isEmpty()) return
-        
+
         val sessionId = currentSessionId ?: "session_${System.currentTimeMillis()}"
         currentSessionId = sessionId
-        
+
         ChatSummaryManager.saveSession(conversationMessages, sessionId)
         Log.d(TAG, "Saved session $sessionId with ${conversationMessages.size} messages")
-        
+
+        // ── NEW: Sync to server ChatRepository ──
+        syncSessionToServer()
+
         // Clear for next session
         conversationMessages.clear()
+    }
+
+    /**
+     * مزامنة الجلسة الحالية مع السيرفر عشان تظهر في الـ ChatRepository / ChatScreen
+     */
+    private fun syncSessionToServer() {
+        val prefs = context.getSharedPreferences("axon_prefs", Context.MODE_PRIVATE)
+        val rawEndpoint = prefs.getString("endpoint", MainActivity.PRESET_ENDPOINTS[0])
+            ?: MainActivity.PRESET_ENDPOINTS[0]
+        val messagesToSync = conversationMessages.toList()
+
+        scope.launch(Dispatchers.IO) {
+            try {
+                val nodeId = currentServerNodeId
+                if (nodeId == null) {
+                    // أول مرة → POST جديدة ونتخزن الـ node_id
+                    val newId = ChatRepository.saveSession(rawEndpoint, messagesToSync)
+                    if (newId.isNotEmpty()) {
+                        currentServerNodeId = newId
+                        Log.d(TAG, "Session synced to server: node $newId")
+                    } else {
+                        Log.w(TAG, "Server sync failed (saveSession returned empty)")
+                    }
+                } else {
+                    // جلسة مستمرة → تحديث
+                    ChatRepository.updateSession(rawEndpoint, nodeId, messagesToSync)
+                    Log.d(TAG, "Session updated on server: node $nodeId")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Server sync failed: ${e.message}")
+            }
+        }
     }
 
     fun isModelReady(): Boolean = llmProvider.isReady
@@ -315,7 +357,7 @@ class LocalVoiceSession(
         currentState = State.LLM_THINKING
         visualizer.setState(VisualizerState.OrbState.THINKING)
         visualizer.setAudioLevel(0f)
-        
+
         // ← NEW: Notify conversation manager that thinking started
         conversationManager?.notifyThinkingStarted()
 
@@ -331,6 +373,7 @@ class LocalVoiceSession(
 
         sentenceBuffer.clear()
         isSpeaking = false
+        streamedAnySentence = false
 
         val fullResponseBuffer = StringBuilder()
         var handledByToolCall = false
@@ -345,19 +388,19 @@ class LocalVoiceSession(
             onChunk = { chunk ->
                 fullResponseBuffer.append(chunk)
                 onLlmResponse(fullResponseBuffer.toString())
-                
+
                 // Streaming TTS: ابدأ تشمع الجمل وتكلم فوراً
                 processLlmChunkForTts(chunk)
             },
             onAction = { actions ->
                 handledByToolCall = true
-                
+
                 // Add assistant action response to conversation history
                 val actionDesc = actions.joinToString(", ") { act ->
                     "${act.optString("action")}: ${act.optJSONObject("params")?.toString() ?: "{}"}"
                 }
                 conversationMessages.add(ChatMessage(text = "Executing: $actionDesc", isUser = false))
-                
+
                 scope.launch(Dispatchers.Main) {
                     val confirmations = StringBuilder()
                     for (actionJson in actions) {
@@ -429,6 +472,19 @@ class LocalVoiceSession(
                 if (remainingText.isNotBlank()) {
                     sendTextToOrb(remainingText)
                     speakText(remainingText, isLast = true)
+                } else if (streamedAnySentence) {
+                    // كل الجمل اتنطقت بالفعل أثناء الـ streaming — ميعيدش الكلام
+                    sendTextToOrb(fullResponse)
+                    val tts = ttsEngine
+                    if (tts != null) {
+                        tts.markEndOfStream {
+                            conversationManager?.notifySpeakingEnded()
+                            isSpeaking = false
+                        }
+                    } else {
+                        conversationManager?.notifySpeakingEnded()
+                        isSpeaking = false
+                    }
                 } else if (fullResponse.isNotBlank()) {
                     sendTextToOrb(fullResponse)  // ← NEW
                     speakText(fullResponse, isLast = true)
@@ -1191,7 +1247,7 @@ class LocalVoiceSession(
                             }
                             "done" -> {
                                 val result = if (fullResponse.isNotEmpty()) fullResponse.toString().trim()
-                                    else json.optString("text", "")
+                                else json.optString("text", "")
                                 ws.close(1000, "Done")
                                 client.dispatcher.executorService.shutdown()
                                 latch.complete(result)
@@ -1257,6 +1313,7 @@ class LocalVoiceSession(
             text = sentenceBuffer.toString()
 
             if (sentence.isNotBlank()) {
+                streamedAnySentence = true
                 if (!firstSentenceInThisChunk && !isSpeaking) {
                     // دي أول جملة وهنبدأ نتكلم فيها
                     conversationManager?.notifySpeakingStarted()
@@ -1281,7 +1338,7 @@ class LocalVoiceSession(
 
     private fun speakText(text: String, isLast: Boolean) {
         if (text.isBlank()) return
-        
+
         // ── NEW: Prevent duplicate TTS playback ──
         val currentTime = System.currentTimeMillis()
         if (text == lastSpokenText && (currentTime - ttsSpeakTime) < 3000) {
@@ -1294,7 +1351,7 @@ class LocalVoiceSession(
         }
         lastSpokenText = text
         ttsSpeakTime = currentTime
-        
+
         val tts = ttsEngine ?: run {
             Log.w(TAG, "TTS engine not available")
             return
