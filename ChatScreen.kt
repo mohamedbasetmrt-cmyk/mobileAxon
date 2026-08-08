@@ -1060,7 +1060,11 @@ fun ChatScreen(
         cohereProvider.clearHistory()
         dahlProvider.clearHistory()
         showHistory = false
+        // تحديث قائمة التاريخ بعد الحفظ
+        refreshHistoryTrigger++
     }
+    
+    var refreshHistoryTrigger by remember { mutableStateOf(0) }
 
     LaunchedEffect(Unit) {
         if (ChatSessionState.hasSession()) {
@@ -1372,6 +1376,7 @@ fun ChatScreen(
         ) {
             HudHistorySheet(
                 context   = context,
+                refreshTrigger = refreshHistoryTrigger,
                 onLoad    = { loadSession(it) },
                 onDelete  = { id ->
                     scope.launch(kotlinx.coroutines.Dispatchers.IO) {
@@ -1382,6 +1387,7 @@ fun ChatScreen(
                                     messages.clear()
                                     currentSessionId = ""
                                 }
+                                refreshHistoryTrigger++
                             }
                         }
                     }
@@ -1858,6 +1864,7 @@ private fun HudMessageBubble(
 @Composable
 private fun HudHistorySheet(
     context:   android.content.Context,
+    refreshTrigger: Int = 0,
     onLoad:    (ChatSession) -> Unit,
     onDelete:  (String) -> Unit,
     onDismiss: () -> Unit
@@ -1877,7 +1884,7 @@ private fun HudHistorySheet(
         }
     }
 
-    LaunchedEffect(Unit) { refresh() }
+    LaunchedEffect(refreshTrigger) { refresh() }
 
     Column(
         modifier = Modifier

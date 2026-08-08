@@ -139,7 +139,8 @@ object ChatRepository {
                 val messages  = parseMessages(content, context)
                 list.add(ChatSession(id = nodeId, title = title, messages = messages, createdAt = createdAt))
             }
-            list
+            // ترتيب الجلسات من الأحدث للأقدم
+            list.sortedByDescending { it.createdAt }
         } catch (e: Exception) { emptyList() }
     }
 

@@ -65,6 +65,7 @@ import com.example.app_abdelbaset.ui.theme.NeonGreen
 import com.example.app_abdelbaset.ui.theme.NeonCyan
 import com.example.app_abdelbaset.ui.theme.AccentPink
 import com.example.app_abdelbaset.ui.theme.AccentAmber
+import com.example.app_abdelbaset.ChatSession
 
 private enum class Screen { MAIN, SETTINGS, CHAT, WIDGET, PAIR_DESKTOP ,NOTIFICATION_RULES}
 
