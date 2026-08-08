@@ -277,6 +277,9 @@ class LocalVoiceSession(
         currentState = State.LLM_THINKING
         visualizer.setState(VisualizerState.OrbState.THINKING)
         visualizer.setAudioLevel(0f)
+        
+        // ← NEW: Notify conversation manager that thinking started
+        conversationManager?.notifyThinkingStarted()
 
         jsonBuffer.clear()
         isCollectingJson = false
@@ -304,6 +307,9 @@ class LocalVoiceSession(
             onChunk = { chunk ->
                 fullResponseBuffer.append(chunk)
                 onLlmResponse(fullResponseBuffer.toString())
+                
+                // Streaming TTS: ابدأ تشمع الجمل وتكلم فوراً
+                processLlmChunkForTts(chunk)
             },
             onAction = { actions ->
                 handledByToolCall = true
@@ -366,16 +372,25 @@ class LocalVoiceSession(
                     return@sendMessage
                 }
 
-                if (fullResponse.isNotBlank()) {
+                // باقي النص اللي لم يتم التحدث به بعد
+                val remainingText = sentenceBuffer.toString().trim()
+                if (remainingText.isNotBlank()) {
+                    sendTextToOrb(remainingText)
+                    speakText(remainingText, isLast = true)
+                } else if (fullResponse.isNotBlank()) {
                     sendTextToOrb(fullResponse)  // ← NEW
                     speakText(fullResponse, isLast = true)
                 } else {
+                    // لو مفيش نص، نبلغ الـ Conversation Manager إن الـ LLM خلص
+                    conversationManager?.notifySpeakingEnded()
                     transitionToIdle()
                 }
             },
             onError = { err ->
                 Log.e(TAG, "LLM error: $err")
                 onError("LLM: $err")
+                // في حالة الخطأ، نبلغ الـ Conversation Manager إن المحادثة انتهت
+                conversationManager?.notifySpeakingEnded()
                 transitionToIdle()
             }
         )
@@ -1178,6 +1193,9 @@ class LocalVoiceSession(
         sentenceBuffer.append(chunk)
         var text = sentenceBuffer.toString()
 
+        // أول جملة، نبلغ الـ Conversation Manager إننا بدأنا الكلام
+        var firstSentenceInThisChunk = false
+
         while (true) {
             val endIndex = findSentenceEnd(text)
             if (endIndex == -1) break
@@ -1187,6 +1205,11 @@ class LocalVoiceSession(
             text = sentenceBuffer.toString()
 
             if (sentence.isNotBlank()) {
+                if (!firstSentenceInThisChunk && !isSpeaking) {
+                    // دي أول جملة وهنبدأ نتكلم فيها
+                    conversationManager?.notifySpeakingStarted()
+                    firstSentenceInThisChunk = true
+                }
                 speakText(sentence, isLast = false)
             }
         }
@@ -1210,7 +1233,7 @@ class LocalVoiceSession(
 
         if (!isSpeaking) {
             isSpeaking = true
-            conversationManager?.notifySpeakingStarted() // ← NEW
+            // تم نقل notifySpeakingStarted إلى processLlmChunkForTts عشان يندى قبل أول جملة
             tts.speak(text, isLast) {
                 if (isLast) {
                     conversationManager?.notifySpeakingEnded() // ← هيخليه يرجع LISTENING
