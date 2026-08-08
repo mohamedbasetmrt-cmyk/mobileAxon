@@ -1052,6 +1052,8 @@ fun ChatScreen(
         scope.launch { if (messages.isNotEmpty()) listState.animateScrollToItem(messages.size - 1) }
     }
 
+    var refreshHistoryTrigger by remember { mutableStateOf(0) }
+
     fun startNewChat() {
         saveCurrentSession()
         messages.clear()
@@ -1063,8 +1065,6 @@ fun ChatScreen(
         // تحديث قائمة التاريخ بعد الحفظ
         refreshHistoryTrigger++
     }
-    
-    var refreshHistoryTrigger by remember { mutableStateOf(0) }
 
     LaunchedEffect(Unit) {
         if (ChatSessionState.hasSession()) {
