@@ -134,7 +134,7 @@ class CohereLlmProvider(private val context: Context) : LlmProvider {
             append("2. Do NOT repeat yourself or restate the user's question. If the user says 'open whatsapp', just say 'Opening WhatsApp.' Do not say 'Sure, I can open WhatsApp for you right now.'\n")
             append("3. Be fully aware of the conversation history. If a user says 'and send a message', you know exactly what they mean based on previous turns.\n")
             append("4. Use natural, casual language. Avoid robotic intros like 'Here is the information you requested.'\n")
-            append("5. ALWAYS remember your name is Axon. If asked about yourself, say you're Axon, an AI voice assistant.\n\n")
+            append("5. If asked about yourself, say: 'I'm Axon, your AI voice assistant. I can help you control your phone, manage tasks, search for information, and have natural conversations.'\n\n")
 
             append("## YOUR CAPABILITIES\n")
             append("You can help users with:\n")
@@ -423,13 +423,34 @@ class CohereLlmProvider(private val context: Context) : LlmProvider {
 
         val imageDataUrl = imageB64?.let { "data:$mediaType;base64,$it" }
 
+        // ── NEW: Build smart context from past conversation summaries ──
+        val currentHistoryMessages = messageHistory.map { h ->
+            ChatMessage(text = h.text, isUser = h.role == "user")
+        }
+        val smartContext = ChatSummaryManager.buildSmartContext(
+            currentMessages = currentHistoryMessages,
+            userQuestion = userText,
+            maxSummaries = 3
+        )
+        
+        // Add the smart context as a system augmentation (not in history)
+        val contextAugmentation = if (smartContext.isNotBlank()) {
+            "\n\n--- CONTEXT FROM PAST CONVERSATIONS ---\n$smartContext\n"
+        } else ""
+
         messageHistory.add(HistoryMessage("user", userText, imageDataUrl))
         trimHistory()
 
         currentJob?.cancel()
         currentJob = scope.launch {
             try {
-                val systemPrompt = TOOL_MODE_SYSTEM_PROMPT + (SystemPromptManager.getContextBlock() ?: "")
+                // Include the context augmentation in the system prompt
+                val baseSystemPrompt = TOOL_MODE_SYSTEM_PROMPT + (SystemPromptManager.getContextBlock() ?: "")
+                val systemPrompt = if (contextAugmentation.isNotBlank()) {
+                    baseSystemPrompt + contextAugmentation
+                } else {
+                    baseSystemPrompt
+                }
                 val messagesArray = buildMessagesArray(systemPrompt)
 
                 val allTextBuilder = StringBuilder()
@@ -556,7 +577,18 @@ class CohereLlmProvider(private val context: Context) : LlmProvider {
 
                 withContext(Dispatchers.Main) {
                     if (collectedActions.isNotEmpty()) onAction(collectedActions)
-                    if (hasContent || collectedActions.isNotEmpty()) onDone()
+                    if (hasContent || collectedActions.isNotEmpty()) {
+                        onDone()
+                        // ── NEW: Save the conversation session after completion ──
+                        scope.launch(Dispatchers.IO) {
+                            val sessionId = "cohere_${System.currentTimeMillis()}"
+                            val allMessages = messageHistory.map { h ->
+                                ChatMessage(text = h.text, isUser = h.role == "user")
+                            }
+                            ChatSummaryManager.saveSession(allMessages, sessionId)
+                            Log.d(TAG, "Saved conversation session: $sessionId")
+                        }
+                    }
                     else if (searchRounds > 0) onError("I searched the knowledge base but couldn't find a complete answer. Please try rephrasing.")
                     else onError("No response from Cohere")
                 }
