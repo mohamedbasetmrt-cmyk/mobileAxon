@@ -1,17 +1,1 @@
-```
-# Compiled and build artifacts
-*.class
-*.o
-*.obj
-*.out
-build/
-# Dependencies
-.gradle/
-# Logs and temp files
-*.log
-*.tmp
-*.swp
-# Editors
-.vscode/
-.idea/
-```
+Nothing should be ignored since the changes only include source code files (.kt files) and no build artifacts, dependencies, or temporary files.

@@ -122,8 +122,12 @@ class SimpleOrbView(context: Context) : View(context), OrbMode {
 
     fun setText(text: String) {
         displayText = text
+        // ← MODIFIED: Only expand if we're in CLOSED state (not during SPEAKING/THINKING)
+        // This prevents the orb from showing text during processing, only when user taps
         if (text.isNotEmpty() && currentState == OrbState.CLOSED) {
             expand()
+        } else if (text.isEmpty() && currentState == OrbState.EXPANDED) {
+            collapse()
         } else {
             invalidate()
         }

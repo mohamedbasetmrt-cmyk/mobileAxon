@@ -177,10 +177,18 @@ class LocalVoiceSession(
     fun onWakeWordDetected() {
         if (currentState != State.IDLE) return
         Log.d(TAG, "Wake word -> starting local STT + VAD")
+        
+        // ← NEW: Generate new session ID when starting a new session
+        currentSessionId = "session_${System.currentTimeMillis()}"
+        conversationMessages.clear()
+        
         startLocalProcessing()
     }
 
     fun cancel() {
+        // ← NEW: Save session before cancelling
+        saveCurrentSession()
+        
         sttPulseJob?.cancel()
 //        ttsQueueJob?.cancel()
         if (useOnlineSTT) {
@@ -196,6 +204,9 @@ class LocalVoiceSession(
     }
 
     fun release() {
+        // ← NEW: Save session before releasing
+        saveCurrentSession()
+        
         cancel()
         if (useOnlineSTT) deepgramEngine?.release() else sttEngine?.release()
         vadEngine?.release()
@@ -203,6 +214,22 @@ class LocalVoiceSession(
         conversationManager?.release() // ← NEW
         llmProvider.disconnect()
         scope.cancel()
+    }
+    
+    /**
+     * حفظ الجلسة الحالية قبل إنهائها
+     */
+    private fun saveCurrentSession() {
+        if (conversationMessages.isEmpty()) return
+        
+        val sessionId = currentSessionId ?: "session_${System.currentTimeMillis()}"
+        currentSessionId = sessionId
+        
+        ChatSummaryManager.saveSession(conversationMessages, sessionId)
+        Log.d(TAG, "Saved session $sessionId with ${conversationMessages.size} messages")
+        
+        // Clear for next session
+        conversationMessages.clear()
     }
 
     fun isModelReady(): Boolean = llmProvider.isReady
@@ -1250,22 +1277,43 @@ class LocalVoiceSession(
 
     private fun speakText(text: String, isLast: Boolean) {
         if (text.isBlank()) return
-        val tts = ttsEngine ?: return
+        val tts = ttsEngine ?: run {
+            Log.w(TAG, "TTS engine not available")
+            return
+        }
 
+        // ← NEW: Check TTS state before speaking to avoid "not bound" errors
         if (!isSpeaking) {
             isSpeaking = true
             // تم نقل notifySpeakingStarted إلى processLlmChunkForTts عشان يندى قبل أول جملة
-            tts.speak(text, isLast) {
+            try {
+                tts.speak(text, isLast) {
+                    if (isLast) {
+                        conversationManager?.notifySpeakingEnded() // ← هيخليه يرجع LISTENING
+                        isSpeaking = false
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "TTS speak failed: ${e.message}")
+                isSpeaking = false
+                // حتى لو الـ TTS فشل، نبلغ الـ Conversation Manager إن الكلام انتهى
                 if (isLast) {
-                    conversationManager?.notifySpeakingEnded() // ← هيخليه يرجع LISTENING
-                    isSpeaking = false
+                    conversationManager?.notifySpeakingEnded()
                 }
             }
         } else {
-            tts.queueSentence(text, isLast) {
+            try {
+                tts.queueSentence(text, isLast) {
+                    if (isLast) {
+                        conversationManager?.notifySpeakingEnded() // ← هيخليه يرجع LISTENING
+                        isSpeaking = false
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "TTS queue failed: ${e.message}")
+                isSpeaking = false
                 if (isLast) {
-                    conversationManager?.notifySpeakingEnded() // ← هيخليه يرجع LISTENING
-                    isSpeaking = false
+                    conversationManager?.notifySpeakingEnded()
                 }
             }
         }

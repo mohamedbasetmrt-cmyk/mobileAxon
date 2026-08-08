@@ -129,8 +129,14 @@ class DeepgramSttEngine(
                 Log.i(TAG, "Deepgram WS open")
                 reconnectAttempts = 0
                 wsReady.set(true)
+                
+                // ← NEW: Start capture thread immediately when connection opens
+                // This eliminates the 1-2 second delay before STT starts working
                 if (captureThread == null || captureThread?.isAlive != true) {
                     startCaptureThread()
+                } else {
+                    // If thread already exists, just make sure it's running
+                    Log.d(TAG, "Capture thread already running")
                 }
             }
 
