@@ -56,6 +56,10 @@ class LocalVoiceSession(
     private val jsonBuffer = StringBuilder()
     private var isCollectingJson = false
     private var jsonExecuted = false
+    
+    // ── NEW: Conversation tracking for saving sessions ──
+    private val conversationMessages = mutableListOf<ChatMessage>()
+    private var currentSessionId: String? = null
 
     private fun sendTextToOrb(text: String) {
         val intent = android.content.Intent("com.example.app_abdelbaset.ORB_TEXT")
@@ -137,6 +141,9 @@ class LocalVoiceSession(
                         currentState = mapped
                     },
                     onUserUtterance = { text ->
+                        // Add user message to conversation history
+                        conversationMessages.add(ChatMessage(text = text, isUser = true))
+                        
                         onFinalTranscript(text)
                         startLlmStreaming(text)
                     },
@@ -313,6 +320,13 @@ class LocalVoiceSession(
             },
             onAction = { actions ->
                 handledByToolCall = true
+                
+                // Add assistant action response to conversation history
+                val actionDesc = actions.joinToString(", ") { act ->
+                    "${act.optString("action")}: ${act.optJSONObject("params")?.toString() ?: "{}"}"
+                }
+                conversationMessages.add(ChatMessage(text = "Executing: $actionDesc", isUser = false))
+                
                 scope.launch(Dispatchers.Main) {
                     val confirmations = StringBuilder()
                     for (actionJson in actions) {
@@ -365,11 +379,18 @@ class LocalVoiceSession(
                 }
 
                 if (isDesktopRequest(fullResponse) || isDesktopRequest(userText)) {
-                    sendTextToOrb("Forwarding to desktop...")  // ← NEW
+                    sendTextToOrb("Forwarding to desktop...")
                     forwardToDesktopAgent(userText) { result ->
                         scope.launch { speakText(result, isLast = true) }
                     }
                     return@sendMessage
+                }
+
+                // Add assistant response to conversation history
+                val remainingTextForHistory = sentenceBuffer.toString().trim()
+                val responseText = if (remainingTextForHistory.isNotBlank()) remainingTextForHistory else fullResponse
+                if (responseText.isNotBlank()) {
+                    conversationMessages.add(ChatMessage(text = responseText, isUser = false))
                 }
 
                 // باقي النص اللي لم يتم التحدث به بعد
