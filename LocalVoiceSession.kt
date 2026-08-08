@@ -60,6 +60,10 @@ class LocalVoiceSession(
     // ── NEW: Conversation tracking for saving sessions ──
     private val conversationMessages = mutableListOf<ChatMessage>()
     private var currentSessionId: String? = null
+    
+    // ── NEW: TTS Deduplication ──
+    private var lastSpokenText: String? = null
+    private var ttsSpeakTime: Long = 0
 
     private fun sendTextToOrb(text: String) {
         val intent = android.content.Intent("com.example.app_abdelbaset.ORB_TEXT")
@@ -1277,6 +1281,20 @@ class LocalVoiceSession(
 
     private fun speakText(text: String, isLast: Boolean) {
         if (text.isBlank()) return
+        
+        // ── NEW: Prevent duplicate TTS playback ──
+        val currentTime = System.currentTimeMillis()
+        if (text == lastSpokenText && (currentTime - ttsSpeakTime) < 3000) {
+            Log.d(TAG, "TTS: Skipping duplicate text")
+            if (isLast) {
+                conversationManager?.notifySpeakingEnded()
+                isSpeaking = false
+            }
+            return
+        }
+        lastSpokenText = text
+        ttsSpeakTime = currentTime
+        
         val tts = ttsEngine ?: run {
             Log.w(TAG, "TTS engine not available")
             return
