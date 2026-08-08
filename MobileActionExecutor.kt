@@ -85,6 +85,12 @@ class MobileActionExecutor(private val context: Context) {
         val params = actionFrame.optJSONObject("params") ?: JSONObject()
 
         Log.d(TAG, "Executing action='$action'  params=$params")
+        
+        // ── NEW: Record tool usage in ServiceStatsTracker ──
+        ServiceStatsTracker.recordToolUsage(
+            toolName = action,
+            parameters = params.toString()
+        )
 
         var resultSent = false
         val safeOnResult: (String) -> Unit = { text ->

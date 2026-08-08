@@ -3,6 +3,8 @@ package com.example.app_abdelbaset
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.snapshots.SnapshotStateList
 
 // Data classes for tracking
 data class ToolUsageRecord(
@@ -23,11 +25,11 @@ object ServiceStatsTracker {
     var avgResponseMs by mutableStateOf(0L)
     var isOnline      by mutableStateOf(false)
     
-    // New tracking properties
+    // ── NEW: Use State lists for real-time UI updates ──
     var lastSystemPrompt by mutableStateOf("")
     var lastPromptText by mutableStateOf("")
-    var toolUsageHistory by mutableStateOf(listOf<ToolUsageRecord>())
-    var conversationSummaries by mutableStateOf(listOf<ConversationSummary>())
+    val toolUsageHistory = mutableStateListOf<ToolUsageRecord>()
+    val conversationSummaries = mutableStateListOf<ConversationSummary>()
     
     private var totalResponseMs = 0L
     private var responseCount   = 0
@@ -65,7 +67,8 @@ object ServiceStatsTracker {
             toolName = toolName,
             parameters = parameters
         )
-        toolUsageHistory = listOf(record) + toolUsageHistory.take(19) // Keep last 20
+        toolUsageHistory.add(0, record) // Add to top
+        if (toolUsageHistory.size > 20) toolUsageHistory.removeAt(20) // Keep last 20
     }
     
     fun recordConversationSummary(sessionId: String, messageCount: Int, summary: String) {
@@ -75,7 +78,8 @@ object ServiceStatsTracker {
             messageCount = messageCount,
             summary = summary
         )
-        conversationSummaries = listOf(summaryRecord) + conversationSummaries.take(19) // Keep last 20
+        conversationSummaries.add(0, summaryRecord) // Add to top
+        if (conversationSummaries.size > 20) conversationSummaries.removeAt(20) // Keep last 20
     }
 
     fun avgResponseString(): String {
@@ -92,7 +96,7 @@ object ServiceStatsTracker {
         isOnline        = false
         lastSystemPrompt = ""
         lastPromptText = ""
-        toolUsageHistory = listOf()
-        conversationSummaries = listOf()
+        toolUsageHistory.clear()
+        conversationSummaries.clear()
     }
 }

@@ -1,1 +1,42 @@
-Nothing should be ignored based on the provided file changes. The only modified file is `LocalVoiceSession.kt`, which is a source code file and should not be ignored. There are no build artifacts, dependencies, or temporary files in the changes that would warrant adding ignore rules.
+```
+# Compiled and build artifacts
+*.class
+*.o
+*.obj
+*.out
+build/
+target/
+
+# Dependencies
+.gradle/
+.mypy_cache/
+.pytest_cache/
+__pycache__/
+node_modules/
+venv/
+.venv/
+
+# Logs and temp files
+*.log
+*.tmp
+*.swp
+*.swo
+
+# Environment
+.env
+.env.local
+*.env.*
+
+# Editors
+.vscode/
+.idea/
+
+# Coverage
+coverage/
+htmlcov/
+.coverage
+
+# System files
+.DS_Store
+Thumbs.db
+```

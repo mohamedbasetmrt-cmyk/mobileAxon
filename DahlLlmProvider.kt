@@ -445,6 +445,13 @@ class DahlLlmProvider(private val context: Context) : LlmProvider {
         currentJob = scope.launch {
             try {
                 val systemPrompt = TOOL_MODE_SYSTEM_PROMPT + (SystemPromptManager.getContextBlock() ?: "")
+                
+                // ── NEW: Record prompts in ServiceStatsTracker ──
+                ServiceStatsTracker.recordPrompts(
+                    systemPrompt = systemPrompt,
+                    userPrompt = messages.joinToString("\n") { "${if(it.isUser) "User" else "Assistant"}: ${it.text}" }
+                )
+                
                 val messagesArray = buildMessagesArray(systemPrompt)
 
                 val allTextBuilder = StringBuilder()
