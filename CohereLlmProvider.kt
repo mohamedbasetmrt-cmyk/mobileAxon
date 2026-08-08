@@ -451,6 +451,13 @@ class CohereLlmProvider(private val context: Context) : LlmProvider {
                 } else {
                     baseSystemPrompt
                 }
+                
+                // ── NEW: Record prompts in ServiceStatsTracker ──
+                ServiceStatsTracker.recordPrompts(
+                    systemPrompt = systemPrompt,
+                    userPrompt = messages.joinToString("\n") { "${if(it.isUser) "User" else "Assistant"}: ${it.text}" }
+                )
+                
                 val messagesArray = buildMessagesArray(systemPrompt)
 
                 val allTextBuilder = StringBuilder()

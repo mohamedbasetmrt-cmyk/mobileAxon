@@ -76,6 +76,13 @@ object ChatSummaryManager {
             }
             summaryFile.writeText(summaryObj.toString())
             
+            // ── NEW: Record in ServiceStatsTracker for real-time Dashboard display ──
+            ServiceStatsTracker.recordConversationSummary(
+                sessionId = sessionId,
+                messageCount = messages.size,
+                summary = summary
+            )
+            
             Log.d(TAG, "Saved session $sessionId with ${messages.size} messages")
             return true
         } catch (e: Exception) {

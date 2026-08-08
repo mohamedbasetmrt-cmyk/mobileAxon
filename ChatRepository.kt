@@ -3,6 +3,7 @@ package com.example.app_abdelbaset
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.util.Log
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -141,7 +142,18 @@ object ChatRepository {
             }
             // ترتيب الجلسات من الأحدث للأقدم
             list.sortedByDescending { it.createdAt }
-        } catch (e: Exception) { emptyList() }
+        } catch (e: Exception) { 
+            // لو فيه خطأ، حاول ترجع الشاتات المحلية من ChatSummaryManager
+            Log.w("ChatRepository", "Error fetching remote sessions: ${e.message}, falling back to local")
+            ChatSummaryManager.getAllSummaries().map { summary ->
+                ChatSession(
+                    id = summary.sessionId,
+                    title = summary.title,
+                    messages = ChatSummaryManager.getFullSession(summary.sessionId) ?: emptyList(),
+                    createdAt = summary.createdAt
+                )
+            }.sortedByDescending { it.createdAt }
+        }
     }
 
     private fun parseMessages(contentJson: String, context: Context): List<ChatMessage> {
