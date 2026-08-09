@@ -129,7 +129,7 @@ class DeepgramSttEngine(
                 Log.i(TAG, "Deepgram WS open")
                 reconnectAttempts = 0
                 wsReady.set(true)
-                
+
                 // ← NEW: Start capture thread immediately when connection opens
                 // This eliminates the 1-2 second delay before STT starts working
                 if (captureThread == null || captureThread?.isAlive != true) {
@@ -237,19 +237,71 @@ class DeepgramSttEngine(
         }
     }
 
-    // استبدل دالة startCaptureThread في DeepgramSttEngine.kt بالكود ده:
-
     private fun startCaptureThread() {
-        val minBuf = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL_CONFIG, AUDIO_FORMAT)
-        val recBuf = maxOf(minBuf, CHUNK_BYTES * 8)
+        captureThread = Thread({
+            Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
+            val byteBuffer  = ByteArray(CHUNK_BYTES)
+            val shortBuffer = ShortArray(CHUNK_BYTES / 2)
 
-        audioRecord = AudioRecord(
-            MediaRecorder.AudioSource.VOICE_COMMUNICATION, // ← التعديل هنا
-            SAMPLE_RATE, CHANNEL_CONFIG, AUDIO_FORMAT, recBuf
-        ).also { ar ->
+            while (!Thread.currentThread().isInterrupted && isRunning.get()) {
+                val record = openAudioRecord()
+                if (record == null) {
+                    if (!isRunning.get()) break
+                    Log.w(TAG, "AudioRecord init failed — retrying in 200ms")
+                    try { Thread.sleep(200) } catch (_: InterruptedException) { break }
+                    continue
+                }
+
+                try {
+                    while (!Thread.currentThread().isInterrupted && isRunning.get()) {
+                        val read = record.read(byteBuffer, 0, CHUNK_BYTES)
+                        if (read <= 0) continue
+
+                        for (i in shortBuffer.indices) {
+                            val lo = byteBuffer[i * 2].toInt() and 0xFF
+                            val hi = byteBuffer[i * 2 + 1].toInt()
+                            shortBuffer[i] = ((hi shl 8) or lo).toShort()
+                        }
+                        onAudioFrame?.invoke(shortBuffer, shortBuffer.size)
+
+                        if (wsReady.get()) {
+                            webSocket?.send(byteBuffer.copyOf(read).toByteString())
+                        }
+                    }
+                } catch (e: InterruptedException) {
+                    Log.d(TAG, "Capture thread interrupted")
+                    break
+                } catch (e: Exception) {
+                    Log.e(TAG, "Capture error: ${e.message}")
+                } finally {
+                    closeAudioRecord(record)
+                }
+
+                if (!isRunning.get() || Thread.currentThread().isInterrupted) break
+
+                // خطأ عابر → نعيد فتح الميكروفون ونكمل بدل ما الخيط يموت نهائياً
+                Log.w(TAG, "Capture crashed — restarting AudioRecord")
+                try { Thread.sleep(200) } catch (_: InterruptedException) { break }
+            }
+        }, "deepgram-capture")
+
+        captureThread?.isDaemon = true
+        captureThread?.start()
+    }
+
+    private fun openAudioRecord(): AudioRecord? {
+        return try {
+            val minBuf = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL_CONFIG, AUDIO_FORMAT)
+            val recBuf = maxOf(minBuf, CHUNK_BYTES * 8)
+
+            val ar = AudioRecord(
+                MediaRecorder.AudioSource.VOICE_COMMUNICATION, // ← التعديل هنا
+                SAMPLE_RATE, CHANNEL_CONFIG, AUDIO_FORMAT, recBuf
+            )
             if (ar.state != AudioRecord.STATE_INITIALIZED) {
-                onError("AudioRecord init failed")
-                return
+                Log.e(TAG, "AudioRecord init failed")
+                ar.release()
+                return null
             }
 
             // تفعيل الـ Echo Cancellation
@@ -265,42 +317,26 @@ class DeepgramSttEngine(
             } catch (_: Exception) {}
 
             ar.startRecording()
+            audioRecord = ar
             Log.d(TAG, "AudioRecord started with VOICE_COMMUNICATION & AEC")
+            ar
+        } catch (e: Exception) {
+            Log.e(TAG, "AudioRecord open error: ${e.message}")
+            null
         }
+    }
 
-        captureThread = Thread({
-            Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
-            val byteBuffer  = ByteArray(CHUNK_BYTES)
-            val shortBuffer = ShortArray(CHUNK_BYTES / 2)
-
-            try {
-                while (!Thread.currentThread().isInterrupted && isRunning.get()) {
-                    val ar = audioRecord ?: break
-                    val read = ar.read(byteBuffer, 0, CHUNK_BYTES)
-                    if (read <= 0) continue
-
-                    for (i in shortBuffer.indices) {
-                        val lo = byteBuffer[i * 2].toInt() and 0xFF
-                        val hi = byteBuffer[i * 2 + 1].toInt()
-                        shortBuffer[i] = ((hi shl 8) or lo).toShort()
-                    }
-                    onAudioFrame?.invoke(shortBuffer, shortBuffer.size)
-
-                    if (wsReady.get()) {
-                        webSocket?.send(byteBuffer.copyOf(read).toByteString())
-                    }
-                }
-            } catch (e: InterruptedException) {
-                Log.d(TAG, "Capture thread interrupted")
-            } catch (e: Exception) {
-                Log.e(TAG, "Capture error: ${e.message}")
-            } finally {
-                stopAudioRecord()
+    private fun closeAudioRecord(record: AudioRecord?) {
+        try {
+            record?.apply {
+                if (recordingState == AudioRecord.RECORDSTATE_RECORDING) stop()
+                release()
             }
-        }, "deepgram-capture")
-
-        captureThread?.isDaemon = true
-        captureThread?.start()
+            if (audioRecord === record) audioRecord = null
+            Log.d(TAG, "AudioRecord released")
+        } catch (e: Exception) {
+            Log.w(TAG, "AudioRecord release error: ${e.message}")
+        }
     }
 
     private fun stopAudioRecord() {

@@ -69,14 +69,17 @@ class LocalVadEngine(
         }
     }
 
+    @Synchronized
     fun start() {
-        isRunning.set(true)
         isSpeechActive = false
         lastSpeechTime = System.currentTimeMillis()
+        // لو شغال بالفعل متعملش reset للـ native — عشان متكسرش وهو بيستقبل صوت
+        if (isRunning.getAndSet(true)) return
         vad?.reset()
         Log.i(TAG, "VAD started")
     }
 
+    @Synchronized
     fun stop() {
         isRunning.set(false)
         vad?.reset()
@@ -84,12 +87,14 @@ class LocalVadEngine(
         Log.i(TAG, "VAD stopped")
     }
 
+    @Synchronized
     fun release() {
         stop()
         vad?.release()
         vad = null
     }
 
+    @Synchronized
     fun processAudio(shortBuffer: ShortArray, length: Int) {
         if (!isRunning.get()) return
         val v = vad ?: return
@@ -122,5 +127,6 @@ class LocalVadEngine(
         }
     }
 
+    @get:Synchronized
     val isCurrentlyActive: Boolean get() = isSpeechActive
 }
