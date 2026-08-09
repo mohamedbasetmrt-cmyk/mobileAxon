@@ -131,6 +131,9 @@ class MainActivity : ComponentActivity() {
         private const val PREF_ANDROID_TTS_PKG = "android_tts_pkg"
         private const val PREF_STT_MODE = "stt_mode"
         private const val PREF_DEEPGRAM_API_KEY = "deepgram_api_key"
+        private const val PREF_DEEPGRAM_TTS_KEY = "deepgram_tts_api_key"
+        private const val PREF_DEEPGRAM_TTS_VOICE = "deepgram_tts_voice"
+        private const val PREF_SERVER_CONNECT_ENABLED = "server_connect_enabled"
         private const val REQUEST_CALL_PERMISSION = 1001
         @JvmStatic
         private var sharedTtsEngine: TtsEngine? = null
@@ -555,6 +558,14 @@ class MainActivity : ComponentActivity() {
 
     private fun startListeningService() {
         if (!checkAllPermissions()) { requestAllPermissions(); return }
+        
+        // Check if server is enabled when in SERVER mode
+        val serverConnectEnabled = prefs.getBoolean(PREF_SERVER_CONNECT_ENABLED, false)
+        if (currentMode == AxonMode.SERVER && !serverConnectEnabled) {
+            Toast.makeText(this, "⚠️ Turn on server in Settings › Backend first", Toast.LENGTH_LONG).show()
+            return
+        }
+        
         if (diagnosticResult?.allPassed != true && currentMode == AxonMode.SERVER) {
             Toast.makeText(this, "⚠️ Fix issues in Settings first!", Toast.LENGTH_LONG).show(); return
         }
@@ -654,6 +665,10 @@ class MainActivity : ComponentActivity() {
                 TtsEngineType.ANDROID_TTS -> sttOk && vadOk && llmOk && androidTtsOk
                 TtsEngineType.SHERPA_SUPERTONIC -> sttOk && vadOk && llmOk && supertonicReady
                 TtsEngineType.SHERPA_VITS_PIPER -> sttOk && vadOk && llmOk && vitsReady
+                TtsEngineType.DEEPGRAM_TTS -> {
+                    val deepgramKey = prefs.getString(PREF_DEEPGRAM_TTS_KEY, "") ?: ""
+                    sttOk && vadOk && llmOk && deepgramKey.isNotBlank()
+                }
             }
 
             Toast.makeText(ctx, if (allOk) "✅ All local models ready" else "⚠️ Some models missing", Toast.LENGTH_LONG).show()
@@ -749,6 +764,11 @@ class MainActivity : ComponentActivity() {
                     }
                 }
                 sherpaTtsEngine
+            }
+            TtsEngineType.DEEPGRAM_TTS -> {
+                val apiKey = prefs.getString(PREF_DEEPGRAM_TTS_KEY, "") ?: ""
+                val voice = prefs.getString(PREF_DEEPGRAM_TTS_VOICE, "aura-2-en-daniel") ?: "aura-2-en-daniel"
+                DeepgramTtsEngine(applicationContext, apiKey, voice, "aura-2")
             }
         }
     }
@@ -1476,12 +1496,57 @@ fun SettingsScreen(
                 title = "BACKEND :: NODE SELECT",
                 modifier = Modifier.padding(horizontal = 16.dp)
             ) {
+                // Server Connect Toggle Button
+                val serverConnectEnabled = prefs.getBoolean(PREF_SERVER_CONNECT_ENABLED, false)
+                Box(modifier = Modifier.fillMaxWidth()
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(if (serverConnectEnabled) NeonGreen.copy(0.12f) else AccentAmber.copy(0.12f))
+                    .border(0.5.dp, if (serverConnectEnabled) NeonGreen.copy(0.6f) else AccentAmber.copy(0.6f), RoundedCornerShape(6.dp))
+                    .clickable { 
+                        prefs.edit().putBoolean(PREF_SERVER_CONNECT_ENABLED, !serverConnectEnabled).apply()
+                        Toast.makeText(ctx, if (!serverConnectEnabled) "Server ON - will connect on next start" else "Server OFF - disconnected", Toast.LENGTH_SHORT).show()
+                        // Restart service if running to apply changes
+                        if (isServiceRunning) {
+                            stopListeningService()
+                            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                                startListeningService()
+                            }, 500)
+                        }
+                    }
+                    .padding(vertical = 10.dp), contentAlignment = Alignment.Center) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = if (serverConnectEnabled) androidx.compose.material.icons.Icons.Default.CheckCircle else androidx.compose.material.icons.Icons.Default.Cancel,
+                            contentDescription = null,
+                            tint = if (serverConnectEnabled) NeonGreen else AccentAmber,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            if (serverConnectEnabled) "⟳ TURN OFF SERVER" else "⏻ TURN ON SERVER",
+                            fontSize = 10.sp,
+                            color = if (serverConnectEnabled) NeonGreen else AccentAmber,
+                            letterSpacing = 1.2.sp,
+                            fontFamily = AppFontFamily
+                        )
+                    }
+                }
+                
+                Spacer(Modifier.height(10.dp))
+                
+                if (!serverConnectEnabled) {
+                    Text("⚠️ Server is OFF - endpoint selection has no effect until enabled", 
+                        fontSize = 7.sp, color = AccentAmber.copy(0.8f),
+                        letterSpacing = 0.5.sp, fontFamily = AppFontFamily)
+                    Spacer(Modifier.height(8.dp))
+                }
+                
                 presetEndpoints.forEachIndexed { idx, ep ->
                     HudEndpointRow(
                         label    = ep,
                         selected = selectedEndpoint == ep,
-                        isActive = selectedEndpoint == ep,
-                        onClick  = { onSelectedEndpointChange(ep) }
+                        isActive = selectedEndpoint == ep && serverConnectEnabled,
+                        onClick  = { if (serverConnectEnabled) onSelectedEndpointChange(ep) }
                     )
                     if (idx < presetEndpoints.size - 1) {
                         Divider(color = CardBorder, thickness = 0.5.dp)
@@ -1960,13 +2025,15 @@ fun SettingsScreen(
                     listOf(
                         TtsEngineType.ANDROID_TTS to "◈ ANDROID",
                         TtsEngineType.SHERPA_SUPERTONIC to "◉ SUPERTONIC",
-                        TtsEngineType.SHERPA_VITS_PIPER to "◉ VITS PIPER"
+                        TtsEngineType.SHERPA_VITS_PIPER to "◉ VITS PIPER",
+                        TtsEngineType.DEEPGRAM_TTS to "◉ DEEPGRAM"
                     ).forEach { (engine, label) ->
                         val isSelected = currentTtsEngine == engine
                         val accent = when (engine) {
                             TtsEngineType.ANDROID_TTS -> NeonCyan
                             TtsEngineType.SHERPA_SUPERTONIC -> NeonGreen
                             TtsEngineType.SHERPA_VITS_PIPER -> AccentPink
+                            TtsEngineType.DEEPGRAM_TTS -> AccentAmber
                         }
                         Box(
                             modifier = Modifier.weight(1f).height(38.dp)
@@ -1991,12 +2058,82 @@ fun SettingsScreen(
                         if (modelsStatus.sherpaModelsReady) "✓ SUPERTONIC MODELS READY" else "✗ MODELS MISSING"
                     TtsEngineType.SHERPA_VITS_PIPER ->
                         if (modelsStatus.sherpaModelsReady) "✓ VITS MODELS READY" else "✗ MODELS MISSING"
+                    TtsEngineType.DEEPGRAM_TTS -> {
+                        val deepgramKey = prefs.getString(PREF_DEEPGRAM_TTS_KEY, "") ?: ""
+                        if (deepgramKey.isNotBlank()) "✓ DEEPGRAM API KEY SET" else "✗ API KEY MISSING"
+                    }
                 }
                 Text(engineStatus, fontSize = 8.sp,
                     color = if ((currentTtsEngine == TtsEngineType.ANDROID_TTS && modelsStatus.tts) ||
-                        (currentTtsEngine != TtsEngineType.ANDROID_TTS && modelsStatus.sherpaModelsReady))
+                        (currentTtsEngine != TtsEngineType.ANDROID_TTS && currentTtsEngine != TtsEngineType.DEEPGRAM_TTS && modelsStatus.sherpaModelsReady) ||
+                        (currentTtsEngine == TtsEngineType.DEEPGRAM_TTS && (prefs.getString(PREF_DEEPGRAM_TTS_KEY, "") ?: "").isNotBlank()))
                         NeonGreen.copy(0.7f) else AccentPink.copy(0.7f),
                     letterSpacing = 1.sp, fontFamily = AppFontFamily)
+
+                // Deepgram Config (API Key + Voice)
+                if (currentTtsEngine == TtsEngineType.DEEPGRAM_TTS) {
+                    Spacer(Modifier.height(12.dp))
+                    Divider(color = CardBorder, thickness = 0.5.dp)
+                    Spacer(Modifier.height(12.dp))
+
+                    Text("DEEPGRAM API CONFIG", fontSize = 8.sp, color = AccentAmber.copy(0.8f),
+                        letterSpacing = 1.5.sp, fontFamily = AppFontFamily)
+                    Spacer(Modifier.height(6.dp))
+
+                    var draftApiKey by remember { mutableStateOf(prefs.getString(PREF_DEEPGRAM_TTS_KEY, "") ?: "") }
+                    OutlinedTextField(
+                        value = draftApiKey,
+                        onValueChange = { draftApiKey = it },
+                        label = { Text("API KEY", fontSize = 8.sp,
+                            color = TextMuted, fontFamily = AppFontFamily) },
+                        singleLine = true, modifier = Modifier.fillMaxWidth(),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = AccentAmber, unfocusedBorderColor = CardBorder,
+                            focusedLabelColor = AccentAmber, cursorColor = AccentAmber,
+                            focusedTextColor = TextPrimary, unfocusedTextColor = TextPrimary
+                        ),
+                        textStyle = androidx.compose.ui.text.TextStyle(
+                            fontFamily = AppFontFamily, fontSize = 10.sp)
+                    )
+                    
+                    Spacer(Modifier.height(6.dp))
+                    
+                    var draftVoice by remember { mutableStateOf(prefs.getString(PREF_DEEPGRAM_TTS_VOICE, "aura-2-en-daniel") ?: "aura-2-en-daniel") }
+                    OutlinedTextField(
+                        value = draftVoice,
+                        onValueChange = { draftVoice = it },
+                        label = { Text("VOICE (e.g., aura-2-en-daniel, aurora, olive, aria)", fontSize = 8.sp,
+                            color = TextMuted, fontFamily = AppFontFamily) },
+                        singleLine = true, modifier = Modifier.fillMaxWidth(),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = AccentAmber, unfocusedBorderColor = CardBorder,
+                            focusedLabelColor = AccentAmber, cursorColor = AccentAmber,
+                            focusedTextColor = TextPrimary, unfocusedTextColor = TextPrimary
+                        ),
+                        textStyle = androidx.compose.ui.text.TextStyle(
+                            fontFamily = AppFontFamily, fontSize = 10.sp)
+                    )
+                    
+                    Spacer(Modifier.height(6.dp))
+                    Box(modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(4.dp))
+                        .background(AccentAmber.copy(0.1f))
+                        .border(0.5.dp, AccentAmber.copy(0.5f), RoundedCornerShape(4.dp))
+                        .clickable { 
+                            prefs.edit()
+                                .putString(PREF_DEEPGRAM_TTS_KEY, draftApiKey)
+                                .putString(PREF_DEEPGRAM_TTS_VOICE, draftVoice)
+                                .apply()
+                            Toast.makeText(ctx, "Deepgram config saved", Toast.LENGTH_SHORT).show()
+                        }
+                        .padding(vertical = 8.dp), contentAlignment = Alignment.Center) {
+                        Text("SAVE DEEPGRAM CONFIG", fontSize = 9.sp, color = AccentAmber,
+                            letterSpacing = 1.sp, fontFamily = AppFontFamily)
+                    }
+                    
+                    Spacer(Modifier.height(4.dp))
+                    Text("// Voices: aura-2-en-daniel, aurora, olive, aria, nova, jupiter, etc.", fontSize = 7.sp, color = TextMuted.copy(0.5f),
+                        fontFamily = AppFontFamily)
+                }
 
                 // Custom Model Path (لأي Sherpa engine)
                 if (currentTtsEngine != TtsEngineType.ANDROID_TTS) {

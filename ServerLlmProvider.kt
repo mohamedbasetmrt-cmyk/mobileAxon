@@ -22,10 +22,14 @@ class ServerLlmProvider(
     private var pendingDone:   (() -> Unit)?        = null
     private var pendingError:  ((String) -> Unit)?  = null
     private var _isReady = false
+    
+    @Volatile private var userDisconnected = false
 
     override val isReady: Boolean get() = _isReady
 
     override fun connect(onConnected: () -> Unit) {
+        userDisconnected = false  // Reset on explicit connect
+        
         val sessionId = java.util.UUID.randomUUID().toString()
         val request   = Request.Builder()
             .url("wss://$endpoint/mobile/ws/llm/$sessionId")
@@ -59,10 +63,13 @@ class ServerLlmProvider(
                 webSocket = null
                 onDisconnected()
                 pendingError?.invoke(t.message ?: "Connection failed")
-                // reconnect بعد 2 ثانية
-                android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-                    connect {}
-                }, 2000)
+                
+                // Only auto-reconnect if user hasn't explicitly disconnected
+                if (!userDisconnected) {
+                    android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                        connect {}
+                    }, 2000)
+                }
             }
 
             override fun onClosed(ws: WebSocket, code: Int, reason: String) {
@@ -102,6 +109,7 @@ class ServerLlmProvider(
     }
 
     override fun disconnect() {
+        userDisconnected = true
         webSocket?.close(1000, "Disconnected")
         webSocket = null
         _isReady  = false
