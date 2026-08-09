@@ -1297,8 +1297,30 @@ class LocalVoiceSession(
         }
     }
 
+    /**
+     * تنظيف النص من تاجات think وعلامات * قبل إرساله للـ TTS
+     */
+    private fun cleanTextForTts(text: String): String {
+        var cleaned = text
+        
+        // إزالة تاجات <think>...</think>
+        cleaned = cleaned.replace(Regex("<think>.*?</think>", RegexOption.DOT_MATCHES_ALL), "")
+        
+        // إزالة علامات * (المستخدمة للتنسيق في Markdown)
+        cleaned = cleaned.replace("*", "")
+        
+        // إزالة أي مسافات زائدة
+        cleaned = cleaned.trim()
+        
+        return cleaned
+    }
+
     private fun processLlmChunkForTts(chunk: String) {
-        sentenceBuffer.append(chunk)
+        // تنظيف الـ chunk من التاجات والعلامات قبل المعالجة
+        val cleanedChunk = cleanTextForTts(chunk)
+        if (cleanedChunk.isBlank()) return
+        
+        sentenceBuffer.append(cleanedChunk)
         var text = sentenceBuffer.toString()
 
         // أول جملة، نبلغ الـ Conversation Manager إننا بدأنا الكلام
@@ -1337,11 +1359,19 @@ class LocalVoiceSession(
     }
 
     private fun speakText(text: String, isLast: Boolean) {
-        if (text.isBlank()) return
+        // تنظيف النص قبل النطق (إزالة تاجات think وعلامات *)
+        val cleanedText = cleanTextForTts(text)
+        if (cleanedText.isBlank()) {
+            if (isLast) {
+                conversationManager?.notifySpeakingEnded()
+                isSpeaking = false
+            }
+            return
+        }
 
         // ── NEW: Prevent duplicate TTS playback ──
         val currentTime = System.currentTimeMillis()
-        if (text == lastSpokenText && (currentTime - ttsSpeakTime) < 3000) {
+        if (cleanedText == lastSpokenText && (currentTime - ttsSpeakTime) < 3000) {
             Log.d(TAG, "TTS: Skipping duplicate text")
             if (isLast) {
                 conversationManager?.notifySpeakingEnded()
@@ -1349,7 +1379,7 @@ class LocalVoiceSession(
             }
             return
         }
-        lastSpokenText = text
+        lastSpokenText = cleanedText
         ttsSpeakTime = currentTime
 
         val tts = ttsEngine ?: run {
@@ -1362,7 +1392,7 @@ class LocalVoiceSession(
             isSpeaking = true
             // تم نقل notifySpeakingStarted إلى processLlmChunkForTts عشان يندى قبل أول جملة
             try {
-                tts.speak(text, isLast) {
+                tts.speak(cleanedText, isLast) {
                     if (isLast) {
                         conversationManager?.notifySpeakingEnded() // ← هيخليه يرجع LISTENING
                         isSpeaking = false
@@ -1378,7 +1408,7 @@ class LocalVoiceSession(
             }
         } else {
             try {
-                tts.queueSentence(text, isLast) {
+                tts.queueSentence(cleanedText, isLast) {
                     if (isLast) {
                         conversationManager?.notifySpeakingEnded() // ← هيخليه يرجع LISTENING
                         isSpeaking = false

@@ -1,49 +1,52 @@
-```kotlin
 # Compiled and build artifacts
 *.class
-*.jar
-*.war
-*.aar
-*.so
-*.dll
-*.dylib
-*.exe
 *.o
 *.obj
+*.exe
+*.dll
+*.so
+*.a
 *.out
+build/
+dist/
+target/
 
 # Dependencies
-.gradle/
-build/
-target/
 node_modules/
 venv/
 .venv/
 __pycache__/
 .mypy_cache/
 .pytest_cache/
-coverage/
-htmlcov/
-.coverage
+.gradle/
+.julia/
+zig*/
 
-# IDE specific
-.idea/
-.vscode/
+# Logs and temp files
+*.log
+*.tmp
 *.swp
 *.swo
-*.tmp
-
-# System files
-.DS_Store
-Thumbs.db
-
-# Logs
-*.log
 
 # Environment
 .env
 .env.local
 *.env.*
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Coverage
+coverage/
+htmlcov/
+.coverage
 
 # Compressed files
 *.zip
@@ -68,4 +71,3 @@ Thumbs.db
 *.tar.bz2
 *.tar.xz
 *.tar.zst
-```
