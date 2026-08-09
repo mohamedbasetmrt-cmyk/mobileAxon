@@ -769,7 +769,7 @@ class MainActivity : ComponentActivity() {
             }
             TtsEngineType.DEEPGRAM_TTS -> {
                 val apiKey = prefs.getString(PREF_DEEPGRAM_TTS_KEY, "") ?: ""
-                val voice = prefs.getString(PREF_DEEPGRAM_TTS_VOICE, "aura-2-en-daniel") ?: "aura-2-en-daniel"
+                val voice = prefs.getString(PREF_DEEPGRAM_TTS_VOICE, "aura-2-odysseus-en") ?: "aura-2-odysseus-en"
                 DeepgramTtsEngine(applicationContext, apiKey, voice, "aura-2")
             }
         }
@@ -2094,11 +2094,11 @@ fun SettingsScreen(
 
                     Spacer(Modifier.height(6.dp))
 
-                    var draftVoice by remember { mutableStateOf(prefs.getString("deepgram_tts_voice", "aura-2-en-daniel") ?: "aura-2-en-daniel") }
+                    var draftVoice by remember { mutableStateOf(prefs.getString("deepgram_tts_voice", "aura-2-odysseus-en") ?: "aura-2-odysseus-en") }
                     OutlinedTextField(
                         value = draftVoice,
                         onValueChange = { draftVoice = it },
-                        label = { Text("VOICE (e.g., aura-2-en-daniel, aurora, olive, aria)", fontSize = 8.sp,
+                        label = { Text("VOICE (e.g., aura-2-odysseus-en, aurora, olive, aria)", fontSize = 8.sp,
                             color = TextMuted, fontFamily = AppFontFamily) },
                         singleLine = true, modifier = Modifier.fillMaxWidth(),
                         colors = OutlinedTextFieldDefaults.colors(
@@ -2127,7 +2127,7 @@ fun SettingsScreen(
                     }
 
                     Spacer(Modifier.height(4.dp))
-                    Text("// Voices: aura-2-en-daniel, aurora, olive, aria, nova, jupiter, etc.", fontSize = 7.sp, color = TextMuted.copy(0.5f),
+                    Text("// Voices: aura-2-odysseus-en, aurora, olive, aria, nova, jupiter, etc.", fontSize = 7.sp, color = TextMuted.copy(0.5f),
                         fontFamily = AppFontFamily)
                 }
 
