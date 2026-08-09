@@ -27,6 +27,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.Cancel
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -188,13 +190,13 @@ class MainActivity : ComponentActivity() {
     @SuppressLint("UnspecifiedRegisterReceiverFlag")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        
+
         // ═══════════════════════════════════════════════════════════════
         // INIT MANAGERS - MUST BE CALLED BEFORE ANYTHING ELSE
         // ═══════════════════════════════════════════════════════════════
         SystemPromptManager.init(applicationContext)
         ChatSummaryManager.init(applicationContext)  // ← NEW: Initialize Chat Summary Manager
-        
+
         WindowCompat.setDecorFitsSystemWindows(window, false)
         selectedEndpoint = prefs.getString(PREF_ENDPOINT, PRESET_ENDPOINTS[0]) ?: PRESET_ENDPOINTS[0]
         customEndpoint   = prefs.getString(PREF_CUSTOM_ENDPOINT, "") ?: ""
@@ -288,7 +290,7 @@ class MainActivity : ComponentActivity() {
                         showDevDashboard -> DevDashboardScreen(
                             onClose = { showDevDashboard = false }
                         )
-                        
+
                         showErrorLog -> ErrorLogScreen(
                             logContent = errorLogContent,
                             logPath = errorLogPath,
@@ -417,7 +419,7 @@ class MainActivity : ComponentActivity() {
                             onDeepgramApiKeyChange = { onDeepgramApiKeyChange(it) },
                             onOpenNotificationRules = { currentScreen = Screen.NOTIFICATION_RULES },
 
-                        )
+                            )
 
                         else -> MainScreen(
                             isServiceRunning = isServiceRunning,
@@ -558,14 +560,14 @@ class MainActivity : ComponentActivity() {
 
     private fun startListeningService() {
         if (!checkAllPermissions()) { requestAllPermissions(); return }
-        
+
         // Check if server is enabled when in SERVER mode
         val serverConnectEnabled = prefs.getBoolean(PREF_SERVER_CONNECT_ENABLED, false)
         if (currentMode == AxonMode.SERVER && !serverConnectEnabled) {
             Toast.makeText(this, "⚠️ Turn on server in Settings › Backend first", Toast.LENGTH_LONG).show()
             return
         }
-        
+
         if (diagnosticResult?.allPassed != true && currentMode == AxonMode.SERVER) {
             Toast.makeText(this, "⚠️ Fix issues in Settings first!", Toast.LENGTH_LONG).show(); return
         }
@@ -1444,6 +1446,7 @@ fun SettingsScreen(
     val CUSTOM_LABEL = "Custom…"
     var draftCustom  by remember { mutableStateOf(customEndpoint) }
     val context = androidx.compose.ui.platform.LocalContext.current
+    val prefs   = context.getSharedPreferences("axon_prefs", Context.MODE_PRIVATE)
 
 
     Box(modifier = Modifier.fillMaxSize().background(BgPrimary)) {
@@ -1497,26 +1500,19 @@ fun SettingsScreen(
                 modifier = Modifier.padding(horizontal = 16.dp)
             ) {
                 // Server Connect Toggle Button
-                val serverConnectEnabled = prefs.getBoolean(PREF_SERVER_CONNECT_ENABLED, false)
+                val serverConnectEnabled = prefs.getBoolean("server_connect_enabled", false)
                 Box(modifier = Modifier.fillMaxWidth()
                     .clip(RoundedCornerShape(6.dp))
                     .background(if (serverConnectEnabled) NeonGreen.copy(0.12f) else AccentAmber.copy(0.12f))
                     .border(0.5.dp, if (serverConnectEnabled) NeonGreen.copy(0.6f) else AccentAmber.copy(0.6f), RoundedCornerShape(6.dp))
-                    .clickable { 
-                        prefs.edit().putBoolean(PREF_SERVER_CONNECT_ENABLED, !serverConnectEnabled).apply()
-                        Toast.makeText(ctx, if (!serverConnectEnabled) "Server ON - will connect on next start" else "Server OFF - disconnected", Toast.LENGTH_SHORT).show()
-                        // Restart service if running to apply changes
-                        if (isServiceRunning) {
-                            stopListeningService()
-                            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-                                startListeningService()
-                            }, 500)
-                        }
+                    .clickable {
+                        prefs.edit().putBoolean("server_connect_enabled", !serverConnectEnabled).apply()
+                        Toast.makeText(context, if (!serverConnectEnabled) "Server ON - will connect on next start" else "Server OFF - disconnected", Toast.LENGTH_SHORT).show()
                     }
                     .padding(vertical = 10.dp), contentAlignment = Alignment.Center) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(
-                            imageVector = if (serverConnectEnabled) androidx.compose.material.icons.Icons.Default.CheckCircle else androidx.compose.material.icons.Icons.Default.Cancel,
+                            imageVector = if (serverConnectEnabled) Icons.Default.CheckCircle else Icons.Default.Cancel,
                             contentDescription = null,
                             tint = if (serverConnectEnabled) NeonGreen else AccentAmber,
                             modifier = Modifier.size(16.dp)
@@ -1531,16 +1527,16 @@ fun SettingsScreen(
                         )
                     }
                 }
-                
+
                 Spacer(Modifier.height(10.dp))
-                
+
                 if (!serverConnectEnabled) {
-                    Text("⚠️ Server is OFF - endpoint selection has no effect until enabled", 
+                    Text("⚠️ Server is OFF - endpoint selection has no effect until enabled",
                         fontSize = 7.sp, color = AccentAmber.copy(0.8f),
                         letterSpacing = 0.5.sp, fontFamily = AppFontFamily)
                     Spacer(Modifier.height(8.dp))
                 }
-                
+
                 presetEndpoints.forEachIndexed { idx, ep ->
                     HudEndpointRow(
                         label    = ep,
@@ -2059,14 +2055,14 @@ fun SettingsScreen(
                     TtsEngineType.SHERPA_VITS_PIPER ->
                         if (modelsStatus.sherpaModelsReady) "✓ VITS MODELS READY" else "✗ MODELS MISSING"
                     TtsEngineType.DEEPGRAM_TTS -> {
-                        val deepgramKey = prefs.getString(PREF_DEEPGRAM_TTS_KEY, "") ?: ""
+                        val deepgramKey = prefs.getString("deepgram_tts_api_key", "") ?: ""
                         if (deepgramKey.isNotBlank()) "✓ DEEPGRAM API KEY SET" else "✗ API KEY MISSING"
                     }
                 }
                 Text(engineStatus, fontSize = 8.sp,
                     color = if ((currentTtsEngine == TtsEngineType.ANDROID_TTS && modelsStatus.tts) ||
                         (currentTtsEngine != TtsEngineType.ANDROID_TTS && currentTtsEngine != TtsEngineType.DEEPGRAM_TTS && modelsStatus.sherpaModelsReady) ||
-                        (currentTtsEngine == TtsEngineType.DEEPGRAM_TTS && (prefs.getString(PREF_DEEPGRAM_TTS_KEY, "") ?: "").isNotBlank()))
+                        (currentTtsEngine == TtsEngineType.DEEPGRAM_TTS && (prefs.getString("deepgram_tts_api_key", "") ?: "").isNotBlank()))
                         NeonGreen.copy(0.7f) else AccentPink.copy(0.7f),
                     letterSpacing = 1.sp, fontFamily = AppFontFamily)
 
@@ -2080,7 +2076,7 @@ fun SettingsScreen(
                         letterSpacing = 1.5.sp, fontFamily = AppFontFamily)
                     Spacer(Modifier.height(6.dp))
 
-                    var draftApiKey by remember { mutableStateOf(prefs.getString(PREF_DEEPGRAM_TTS_KEY, "") ?: "") }
+                    var draftApiKey by remember { mutableStateOf(prefs.getString("deepgram_tts_api_key", "") ?: "") }
                     OutlinedTextField(
                         value = draftApiKey,
                         onValueChange = { draftApiKey = it },
@@ -2095,10 +2091,10 @@ fun SettingsScreen(
                         textStyle = androidx.compose.ui.text.TextStyle(
                             fontFamily = AppFontFamily, fontSize = 10.sp)
                     )
-                    
+
                     Spacer(Modifier.height(6.dp))
-                    
-                    var draftVoice by remember { mutableStateOf(prefs.getString(PREF_DEEPGRAM_TTS_VOICE, "aura-2-en-daniel") ?: "aura-2-en-daniel") }
+
+                    var draftVoice by remember { mutableStateOf(prefs.getString("deepgram_tts_voice", "aura-2-en-daniel") ?: "aura-2-en-daniel") }
                     OutlinedTextField(
                         value = draftVoice,
                         onValueChange = { draftVoice = it },
@@ -2113,23 +2109,23 @@ fun SettingsScreen(
                         textStyle = androidx.compose.ui.text.TextStyle(
                             fontFamily = AppFontFamily, fontSize = 10.sp)
                     )
-                    
+
                     Spacer(Modifier.height(6.dp))
                     Box(modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(4.dp))
                         .background(AccentAmber.copy(0.1f))
                         .border(0.5.dp, AccentAmber.copy(0.5f), RoundedCornerShape(4.dp))
-                        .clickable { 
+                        .clickable {
                             prefs.edit()
-                                .putString(PREF_DEEPGRAM_TTS_KEY, draftApiKey)
-                                .putString(PREF_DEEPGRAM_TTS_VOICE, draftVoice)
+                                .putString("deepgram_tts_api_key", draftApiKey)
+                                .putString("deepgram_tts_voice", draftVoice)
                                 .apply()
-                            Toast.makeText(ctx, "Deepgram config saved", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(context, "Deepgram config saved", Toast.LENGTH_SHORT).show()
                         }
                         .padding(vertical = 8.dp), contentAlignment = Alignment.Center) {
                         Text("SAVE DEEPGRAM CONFIG", fontSize = 9.sp, color = AccentAmber,
                             letterSpacing = 1.sp, fontFamily = AppFontFamily)
                     }
-                    
+
                     Spacer(Modifier.height(4.dp))
                     Text("// Voices: aura-2-en-daniel, aurora, olive, aria, nova, jupiter, etc.", fontSize = 7.sp, color = TextMuted.copy(0.5f),
                         fontFamily = AppFontFamily)
@@ -3467,14 +3463,14 @@ fun DevDashboardScreen(onClose: () -> Unit) {
             shape = RoundedCornerShape(8.dp)
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
-                Text("📊 SERVICE STATS", 
-                    fontSize = 14.sp, 
-                    fontWeight = FontWeight.Bold, 
+                Text("📊 SERVICE STATS",
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold,
                     color = NeonCyan,
                     fontFamily = AppFontFamily,
                     modifier = Modifier.padding(bottom = 12.dp)
                 )
-                
+
                 StatRow("Online", if (ServiceStatsTracker.isOnline) "✅ Yes" else "❌ No")
                 StatRow("Query Count", "${ServiceStatsTracker.queryCount}")
                 StatRow("Avg Response", ServiceStatsTracker.avgResponseString())
@@ -3488,17 +3484,17 @@ fun DevDashboardScreen(onClose: () -> Unit) {
             shape = RoundedCornerShape(8.dp)
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
-                Text("💬 LAST PROMPTS", 
-                    fontSize = 14.sp, 
-                    fontWeight = FontWeight.Bold, 
+                Text("💬 LAST PROMPTS",
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold,
                     color = AccentAmber,
                     fontFamily = AppFontFamily,
                     modifier = Modifier.padding(bottom = 12.dp)
                 )
-                
+
                 if (ServiceStatsTracker.lastSystemPrompt.isNotEmpty()) {
-                    Text("System:", 
-                        fontSize = 10.sp, 
+                    Text("System:",
+                        fontSize = 10.sp,
                         color = TextMuted,
                         fontFamily = AppFontFamily
                     )
@@ -3509,10 +3505,10 @@ fun DevDashboardScreen(onClose: () -> Unit) {
                         modifier = Modifier.padding(bottom = 8.dp)
                     )
                 }
-                
+
                 if (ServiceStatsTracker.lastPromptText.isNotEmpty()) {
-                    Text("User:", 
-                        fontSize = 10.sp, 
+                    Text("User:",
+                        fontSize = 10.sp,
                         color = TextMuted,
                         fontFamily = AppFontFamily
                     )
@@ -3532,14 +3528,14 @@ fun DevDashboardScreen(onClose: () -> Unit) {
             shape = RoundedCornerShape(8.dp)
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
-                Text("🛠️ TOOL USAGE", 
-                    fontSize = 14.sp, 
-                    fontWeight = FontWeight.Bold, 
+                Text("🛠️ TOOL USAGE",
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold,
                     color = AccentPink,
                     fontFamily = AppFontFamily,
                     modifier = Modifier.padding(bottom = 12.dp)
                 )
-                
+
                 if (ServiceStatsTracker.toolUsageHistory.isEmpty()) {
                     Text("No tools used yet",
                         fontSize = 10.sp,
@@ -3573,14 +3569,14 @@ fun DevDashboardScreen(onClose: () -> Unit) {
             shape = RoundedCornerShape(8.dp)
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
-                Text("🧠 CONVERSATION SUMMARIES", 
-                    fontSize = 14.sp, 
-                    fontWeight = FontWeight.Bold, 
+                Text("🧠 CONVERSATION SUMMARIES",
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold,
                     color = NeonGreen,
                     fontFamily = AppFontFamily,
                     modifier = Modifier.padding(bottom = 12.dp)
                 )
-                
+
                 if (ServiceStatsTracker.conversationSummaries.isEmpty()) {
                     Text("No conversations saved yet",
                         fontSize = 10.sp,

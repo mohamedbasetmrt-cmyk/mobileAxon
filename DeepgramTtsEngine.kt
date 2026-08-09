@@ -14,6 +14,8 @@ import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
 
 /**
  * DeepgramTtsEngine: Cloud-based TTS using Deepgram Aura API.
@@ -120,12 +122,15 @@ class DeepgramTtsEngine(
         Thread {
             try {
                 val url = "https://api.deepgram.com/v1/speak?model=$model&voice=$voice&encoding=linear16&sample_rate=$SAMPLE_RATE&container=none"
-                
+
                 val request = Request.Builder()
                     .url(url)
                     .addHeader("Authorization", "Token $apiKey")
                     .addHeader("Content-Type", "application/json")
-                    .post(RequestBody.create(MediaType.parse("application/json"), JSONObject().put("text", text).toString()))
+                    .post(
+                        JSONObject().put("text", text).toString()
+                            .toRequestBody("application/json".toMediaType())
+                    )
                     .build()
 
                 val response = client.newCall(request).execute()
