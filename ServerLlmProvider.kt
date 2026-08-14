@@ -4,6 +4,7 @@ import okhttp3.*
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
 import com.example.app_abdelbaset.SystemPromptManager
+import com.axon.mobile.core.memory.LearningMemoryManager
 
 class ServerLlmProvider(
     private val endpoint:      String,
@@ -94,8 +95,15 @@ class ServerLlmProvider(
         val enrichedJson = try {
             val obj = JSONObject(json)
             val ctx = SystemPromptManager.getContextReference()
-            if (ctx.isNotBlank() && !obj.has("context")) {
-                obj.put("context", ctx)
+            val learned = LearningMemoryManager.getBlock()
+            val combined = when {
+                ctx.isNotBlank() && learned.isNotBlank() -> "$ctx\n\n$learned"
+                ctx.isNotBlank() -> ctx
+                learned.isNotBlank() -> learned
+                else -> ""
+            }
+            if (combined.isNotBlank() && !obj.has("context")) {
+                obj.put("context", combined)
             }
             obj.toString()
         } catch (_: Exception) { json }

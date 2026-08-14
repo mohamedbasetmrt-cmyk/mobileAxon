@@ -7,6 +7,12 @@ import org.json.JSONObject
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.*
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /**
  * ChatSummaryManager - مسئول عن حفظ واسترجاع ملخصات المحادثات
@@ -25,7 +31,8 @@ data class ChatSummary(
     val messageCount: Int,
     val createdAt: Long,
     val updatedAt: Long,
-    val tags: List<String> = emptyList()
+    val tags: List<String> = emptyList(),
+    val serverNodeId: String = ""
 )
 
 object ChatSummaryManager {
@@ -37,6 +44,12 @@ object ChatSummaryManager {
     private lateinit var summariesDir: File
     private lateinit var chatsDir: File
 
+    // Scope + mutex على مستوى الـ app — بيستحملوا خروج ChatScreen من الـ composition
+    private val syncScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val syncMutex = Mutex()
+
+    private fun isUuid(id: String): Boolean = id.contains("-") && id.length >= 30
+
     fun init(context: Context) {
         appContext = context.applicationContext
         summariesDir = File(appContext.filesDir, SUMMARIES_DIR)
@@ -44,6 +57,39 @@ object ChatSummaryManager {
 
         if (!summariesDir.exists()) summariesDir.mkdirs()
         if (!chatsDir.exists()) chatsDir.mkdirs()
+    }
+
+    /**
+     * حفظ محلي + sync على السيرفر بضمانة "مرة واحدة بس":
+     * - الـ POST (create) بيحصل مرة واحدة لكل شات محلي (UUID)
+     * - الشات البعيد اللي اتحمّل من الـ History (id رقمي) بيتعمل له PUT مباشرة
+     * - الـ mutex بيسلسل العمليات والـ scope app-level فمش بيموت مع خروج الشاشة
+     */
+    fun saveSessionAndSync(endpoint: String, messages: List<ChatMessage>, sessionId: String) {
+        syncScope.launch {
+            syncMutex.withLock {
+                try {
+                    saveSession(messages, sessionId)
+
+                    val summary = getSummary(sessionId)
+                    var nodeId = summary?.serverNodeId.orEmpty()
+
+                    if (nodeId.isBlank() && !isUuid(sessionId)) {
+                        // شات بعيد — الـ id بتاعه هو الـ node id نفسه على السيرفر
+                        nodeId = sessionId
+                        setServerNodeId(sessionId, nodeId)
+                    }
+
+                    if (nodeId.isBlank()) {
+                        // شات محلي جديد — نعمل create مرة واحدة بس
+                        val newId = ChatRepository.saveSession(endpoint, messages)
+                        if (newId.isNotEmpty()) setServerNodeId(sessionId, newId)
+                    } else {
+                        ChatRepository.updateSession(endpoint, nodeId, messages)
+                    }
+                } catch (_: Exception) {}
+            }
+        }
     }
 
     /**
@@ -120,6 +166,22 @@ object ChatSummaryManager {
     }
 
     /**
+     * ربط الجلسة المحلية بالـ node_id بتاعها على السيرفر
+     * (عشان الـ History يدمج النسخة المحلية مع البعيدة من غير duplicates)
+     */
+    fun setServerNodeId(sessionId: String, serverNodeId: String) {
+        try {
+            val summaryFile = File(summariesDir, "$sessionId.json")
+            if (!summaryFile.exists()) return
+            val obj = JSONObject(summaryFile.readText())
+            obj.put("serverNodeId", serverNodeId)
+            summaryFile.writeText(obj.toString())
+        } catch (e: Exception) {
+            Log.e(TAG, "Error setting server node id: ${e.message}")
+        }
+    }
+
+    /**
      * استرجاع ملخص محادثة معينة
      */
     fun getSummary(sessionId: String): ChatSummary? {
@@ -140,7 +202,8 @@ object ChatSummaryManager {
                 updatedAt = obj.getLong("updatedAt"),
                 tags = JSONArray(obj.optString("tags", "[]")).let { arr ->
                     List(arr.length()) { arr.optString(it) }
-                }
+                },
+                serverNodeId = obj.optString("serverNodeId", "")
             )
         } catch (e: Exception) {
             Log.e(TAG, "Error getting summary: ${e.message}")
@@ -169,7 +232,8 @@ object ChatSummaryManager {
                             updatedAt = obj.getLong("updatedAt"),
                             tags = JSONArray(obj.optString("tags", "[]")).let { arr ->
                                 List(arr.length()) { arr.optString(it) }
-                            }
+                            },
+                            serverNodeId = obj.optString("serverNodeId", "")
                         )
                     } catch (e: Exception) {
                         Log.w(TAG, "Error parsing ${file.name}: ${e.message}")
@@ -304,28 +368,27 @@ object ChatSummaryManager {
     private fun generateSummary(messages: List<ChatMessage>): String {
         if (messages.isEmpty()) return "Empty conversation"
 
-        // استخراج الموضوعات الرئيسية
-        val userMessages = messages.filter { it.isUser }.map { it.text }
-        val assistantMessages = messages.filter { !it.isUser }.map { it.text }
+        val userMessages = messages.filter { it.isUser }.map { it.text.trim() }
+        val assistantMessages = messages.filter { !it.isUser }.map { it.text.trim() }
 
-        // تلخيص بسيط (في المستقبل ممكن نستخدم LLM أصغر للتوليد)
-        val topics = mutableListOf<String>()
+        val sb = StringBuilder()
+        sb.append("Conversation of ${messages.size} messages.\n")
 
-        // اكتشاف الأفعال والأوامر
-        val actionKeywords = listOf("open", "call", "send", "set", "play", "search", "tell", "what", "how", "why")
-        userMessages.forEach { msg ->
-            actionKeywords.forEach { keyword ->
-                if (msg.lowercase().contains(keyword) && topics.size < 3) {
-                    topics.add(msg.take(80))
-                }
-            }
+        if (userMessages.isNotEmpty()) {
+            sb.append("User asked/intended:\n")
+            userMessages.take(6).forEach { sb.append("  • ${summaryLine(it)}\n") }
+        }
+        if (assistantMessages.isNotEmpty()) {
+            sb.append("Key assistant replies:\n")
+            assistantMessages.take(4).forEach { sb.append("  • ${summaryLine(it)}\n") }
         }
 
-        if (topics.isEmpty()) {
-            topics.add("General conversation")
-        }
+        return sb.toString().trim()
+    }
 
-        return "Discussion about: ${topics.joinToString(", ")}"
+    private fun summaryLine(text: String): String {
+        val clean = text.replace("\n", " ").trim()
+        return if (clean.length > 100) clean.take(100) + "..." else clean
     }
 
     private fun extractKeyPoints(messages: List<ChatMessage>): List<String> {

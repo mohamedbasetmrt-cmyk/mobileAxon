@@ -520,7 +520,6 @@ fun ChatScreen(
     var voiceState       by remember { mutableStateOf(VoiceState.IDLE) }
     var pendingImage     by remember { mutableStateOf<CapturedImage?>(null) }
     var currentSessionId by remember { mutableStateOf("") }
-    var serverNodeId    by remember { mutableStateOf("") } // ← Server-side id for async sync (fire-and-forget)
     var llmMode          by remember { mutableStateOf(
         LlmMode.valueOf(prefs.getString("llm_mode", "SERVER") ?: "SERVER")
     ) }
@@ -688,22 +687,9 @@ fun ChatScreen(
         if (cleanMessages.isEmpty()) return
         if (currentSessionId.isEmpty()) return
 
-        // ── Local-first: save immediately via ChatSummaryManager ──
-        scope.launch(kotlinx.coroutines.Dispatchers.IO) {
-            ChatSummaryManager.saveSession(cleanMessages, currentSessionId)
-        }
-
-        // ── Server sync: async fire-and-forget, not required for success ──
-        scope.launch(kotlinx.coroutines.Dispatchers.IO) {
-            try {
-                if (serverNodeId.isEmpty()) {
-                    val nodeId = ChatRepository.saveSession(rawEndpoint, cleanMessages)
-                    if (nodeId.isNotEmpty()) serverNodeId = nodeId
-                } else {
-                    ChatRepository.updateSession(rawEndpoint, serverNodeId, cleanMessages)
-                }
-            } catch (_: Exception) {}
-        }
+        // Local-first + sync على السيرفر مرة واحدة بس (create أو update)
+        // بيشتغل في scope على مستوى الـ app فمش بيتقفل لو الشاشة خرجت من الـ composition
+        ChatSummaryManager.saveSessionAndSync(rawEndpoint, cleanMessages, currentSessionId)
     }
 
     fun initProvider() {
@@ -1082,7 +1068,6 @@ fun ChatScreen(
         saveCurrentSession()
         messages.clear()
         currentSessionId = ""
-        serverNodeId = ""
         ChatSessionState.clear()
         cohereProvider.clearHistory()
         dahlProvider.clearHistory()
@@ -1411,14 +1396,20 @@ fun ChatScreen(
                 onDelete  = { id ->
                     scope.launch(kotlinx.coroutines.Dispatchers.IO) {
                         // ── Local delete first (immediate) ──
+                        val serverId = ChatSummaryManager.getSummary(id)?.serverNodeId
                         ChatSummaryManager.deleteSession(id)
                         // ── Server delete secondary (fire-and-forget) ──
-                        try { ChatRepository.deleteSession(rawEndpoint, id) } catch (_: Exception) {}
+                        try {
+                            if (!serverId.isNullOrBlank()) {
+                                ChatRepository.deleteSession(rawEndpoint, serverId)
+                            } else {
+                                ChatRepository.deleteSession(rawEndpoint, id)
+                            }
+                        } catch (_: Exception) {}
                         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
                             if (currentSessionId == id) {
                                 messages.clear()
                                 currentSessionId = ""
-                                serverNodeId = ""
                             }
                             refreshHistoryTrigger++
                         }
@@ -1915,7 +1906,8 @@ private fun HudHistorySheet(
     fun refresh() {
         historyScope.launch(kotlinx.coroutines.Dispatchers.IO) {
             // ── Local-first: ChatSummaryManager is the immediate primary source ──
-            val local = ChatSummaryManager.getAllSummaries().map { summary ->
+            val summaries = ChatSummaryManager.getAllSummaries()
+            val local = summaries.map { summary ->
                 ChatSession(
                     id = summary.sessionId,
                     title = summary.title,
@@ -1931,10 +1923,38 @@ private fun HudHistorySheet(
             try {
                 val remote = ChatRepository.fetchSessions(ep, context)
                 if (remote.isNotEmpty()) {
+                    // ربط الـ remote id بالنسخة المحلية اللي معاها نفس الـ serverNodeId
+                    val linkMap = summaries
+                        .filter { it.serverNodeId.isNotBlank() }
+                        .associate { it.serverNodeId to it.sessionId }
+                        .toMutableMap()
+
+                    // Heal: الشاتات القديمة اللي serverNodeId بتاعها فاضي — نربطهم بشات سيرفر بنفس الـ title
+                    // عشان يبقى update مش create جديد
+                    val remoteByTitle = remote.groupBy { it.title.lowercase().trim() }
+                    summaries.filter { it.serverNodeId.isBlank() }.forEach { s ->
+                        val match = remoteByTitle[s.title.lowercase().trim()]?.firstOrNull()
+                        if (match != null) {
+                            ChatSummaryManager.setServerNodeId(s.sessionId, match.id)
+                            linkMap[match.id] = s.sessionId
+                        }
+                    }
+
                     kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
                         val localIds = sessions.map { it.id }.toSet()
-                        sessions = (local + remote.filter { it.id !in localIds })
-                            .sortedByDescending { it.createdAt }
+                        val merged = local.toMutableList()
+                        remote.forEach { r ->
+                            val localId = linkMap[r.id]
+                            if (localId != null) {
+                                // الشات ده ليه نسخة محلية — نحدّثها بالبيانات من السيرفر بدل ما نضيف duplicate
+                                val idx = merged.indexOfFirst { it.id == localId }
+                                if (idx >= 0) merged[idx] = merged[idx].copy(title = r.title, messages = r.messages)
+                            } else if (r.id !in localIds) {
+                                // شات سيرفر ملهوش نسخة محلية — نضيفه
+                                merged.add(r)
+                            }
+                        }
+                        sessions = merged.sortedByDescending { it.createdAt }
                     }
                 }
             } catch (_: Exception) {}

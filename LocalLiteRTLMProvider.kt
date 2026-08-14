@@ -26,7 +26,7 @@ class LocalLiteRTLMProvider(private val context: Context) : LlmProvider {
         val text: String
     )
     private val messageHistory = mutableListOf<HistoryMessage>()
-    private val maxHistoryTurns = 10
+    private val maxHistoryTurns = 20
 
     var onModelStateChange: ((LocalModelState) -> Unit)? = null
 
