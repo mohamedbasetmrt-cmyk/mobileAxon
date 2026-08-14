@@ -1059,6 +1059,7 @@ fun ChatScreen(
         currentSessionId = session.id
         ChatSessionState.save(messages, currentSessionId)
         showHistory = false
+        refreshHistoryTrigger++
         scope.launch { if (messages.isNotEmpty()) listState.animateScrollToItem(messages.size - 1) }
     }
 
@@ -1961,7 +1962,11 @@ private fun HudHistorySheet(
         }
     }
 
-    LaunchedEffect(refreshTrigger) { refresh() }
+    LaunchedEffect(refreshTrigger) { 
+        // تأخير بسيط عشان الـ saveCurrentSession تخلص قبل ما نعمل refresh
+        kotlinx.coroutines.delay(100)
+        refresh() 
+    }
 
     Column(
         modifier = Modifier

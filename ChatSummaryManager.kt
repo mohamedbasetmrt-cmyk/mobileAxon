@@ -69,12 +69,15 @@ object ChatSummaryManager {
         syncScope.launch {
             syncMutex.withLock {
                 try {
-                    // 1. احفظ المحادثة والملخص محلياً FIRST
+                    // 1. استرجع الـ serverNodeId القديم BEFORE الحفظ
+                    val oldSummary = getSummary(sessionId)
+                    val oldNodeId = oldSummary?.serverNodeId.orEmpty()
+
+                    // 2. احفظ المحادثة والملخص محلياً
                     saveSession(messages, sessionId)
 
-                    // 2. استرجع الـ serverNodeId من الملخص اللي اتحفظ للتو
-                    val summary = getSummary(sessionId)
-                    var nodeId = summary?.serverNodeId.orEmpty()
+                    // 3. استخدم الـ serverNodeId القديم (لو موجود)
+                    var nodeId = oldNodeId
 
                     if (nodeId.isBlank() && !isUuid(sessionId)) {
                         // شات بعيد — الـ id بتاعه هو الـ node id نفسه على السيرفر
@@ -251,7 +254,12 @@ object ChatSummaryManager {
                         Log.w(TAG, "Error parsing ${file.name}: ${e.message}")
                         null
                     }
-                }?.sortedByDescending { it.updatedAt } ?: emptyList()
+                }
+                // تجميع النسخ المكررة لنفس الـ serverNodeId وأخذ الأحدث فقط
+                ?.groupBy { it.serverNodeId.ifBlank { it.sessionId } }
+                ?.map { (_, list) -> list.maxByOrNull { it.updatedAt } ?: list.first() }
+                ?.sortedByDescending { it.updatedAt } 
+                ?: emptyList()
         } catch (e: Exception) {
             Log.e(TAG, "Error getting all summaries: ${e.message}")
             emptyList()
