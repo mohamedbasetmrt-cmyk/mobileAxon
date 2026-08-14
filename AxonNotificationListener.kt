@@ -3,8 +3,11 @@ package com.example.app_abdelbaset
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import android.util.Log
+import android.content.Context
 import android.content.Intent
 import android.os.Bundle
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 
 class AxonNotificationListener : NotificationListenerService() {
 
@@ -137,13 +140,8 @@ class AxonNotificationListener : NotificationListenerService() {
         appLabel: String,
         notificationKey: String
     ) {
-        // لو فيه عربي في العنوان أو المحتوى → قول اسم التطبيق بس
-        val speechText = if (containsArabic(title) || containsArabic(content)) {
-            appLabel
-        } else {
-            NotificationAnnounceManager.buildSpeechText(rule, title, content, appLabel)
-        }
-
+        // نص ثابت موحد: "There's a notification from {app}"
+        val speechText = "There's a notification from $appLabel"
         if (speechText.isBlank()) return
 
         if (!announcedKeys.add(notificationKey)) return
@@ -153,12 +151,26 @@ class AxonNotificationListener : NotificationListenerService() {
         if (!announcedKeys.add(dedupKey)) return
 
         ttsExecutor.execute {
-            val engine = LocalTtsEngine(applicationContext)
+            var engine: TtsEngine? = null
             try {
+                // Deepgram TTS لو في نت + API key، وإلا Local TTS
+                engine = buildAnnounceEngine()
                 if (engine.init()) {
                     val latch = java.util.concurrent.CountDownLatch(1)
                     engine.speak(speechText, isLast = true) { latch.countDown() }
                     latch.await(8, java.util.concurrent.TimeUnit.SECONDS)
+
+                    // ── Fallback: Deepgram فشل (key غلط / quota / خطأ) → Local TTS ──
+                    if (engine is DeepgramTtsEngine && engine.lastPlaybackFailed) {
+                        Log.w(TAG, "Deepgram TTS failed, falling back to Local TTS")
+                        engine.release()
+                        engine = LocalTtsEngine(applicationContext)
+                        if (engine.init()) {
+                            val localLatch = java.util.concurrent.CountDownLatch(1)
+                            engine.speak(speechText, isLast = true) { localLatch.countDown() }
+                            localLatch.await(8, java.util.concurrent.TimeUnit.SECONDS)
+                        }
+                    }
 
                     Thread.sleep(3000)
 
@@ -171,8 +183,37 @@ class AxonNotificationListener : NotificationListenerService() {
             } catch (e: Exception) {
                 Log.e(TAG, "Announce TTS error: ${e.message}")
             } finally {
-                engine.release()
+                engine?.release()
             }
+        }
+    }
+
+    /**
+     * يختار محرك TTS للإعلان:
+     * Deepgram (سحابي) لو فيه اتصال بالنت ومفتاح API موجود، وإلا Local TTS.
+     */
+    private fun buildAnnounceEngine(): TtsEngine {
+        val prefs = getSharedPreferences("axon_prefs", Context.MODE_PRIVATE)
+        val apiKey = prefs.getString("deepgram_tts_api_key", "") ?: ""
+        if (isNetworkConnected() && apiKey.isNotBlank()) {
+            val voice = prefs.getString("deepgram_tts_voice", MainActivity.DEFAULT_DEEPGRAM_TTS_VOICE)
+                ?: MainActivity.DEFAULT_DEEPGRAM_TTS_VOICE
+            Log.d(TAG, "Announcement via Deepgram TTS")
+            return DeepgramTtsEngine(applicationContext, apiKey, voice)
+        }
+        Log.d(TAG, "Announcement via Local TTS")
+        return LocalTtsEngine(applicationContext)
+    }
+
+    /** فحص اتصال الإنترنت (يتطلب ACCESS_NETWORK_STATE في الـ Manifest) */
+    private fun isNetworkConnected(): Boolean {
+        return try {
+            val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            val network = cm.activeNetwork ?: return false
+            val caps = cm.getNetworkCapabilities(network) ?: return false
+            caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+        } catch (e: Exception) {
+            false
         }
     }
 
@@ -225,15 +266,6 @@ class AxonNotificationListener : NotificationListenerService() {
             packageManager.getApplicationLabel(info).toString()
         } catch (e: Exception) {
             packageName
-        }
-    }
-    private fun containsArabic(text: String): Boolean {
-        return text.any { c ->
-            c.code in 0x0600..0x06FF ||   // Arabic
-                    c.code in 0x0750..0x077F ||   // Arabic Supplement
-                    c.code in 0x08A0..0x08FF ||   // Arabic Extended-A
-                    c.code in 0xFB50..0xFDFF ||   // Arabic Presentation Forms-A
-                    c.code in 0xFE70..0xFEFF      // Arabic Presentation Forms-B
         }
     }
 

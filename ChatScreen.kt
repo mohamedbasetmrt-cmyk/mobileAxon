@@ -52,6 +52,7 @@ import androidx.compose.material.icons.filled.HourglassEmpty
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.foundation.shape.CircleShape
 import com.example.app_abdelbaset.ui.theme.*
+import com.axon.mobile.core.memory.LearningMemoryManager
 import com.example.app_abdelbaset.ui.theme.BgPrimary
 import com.example.app_abdelbaset.ui.theme.BgSecondary
 import com.example.app_abdelbaset.ui.theme.CardBg
@@ -80,6 +81,8 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.pm.PackageManager
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import android.widget.Toast
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.core.content.ContextCompat
@@ -517,12 +520,14 @@ fun ChatScreen(
     var voiceState       by remember { mutableStateOf(VoiceState.IDLE) }
     var pendingImage     by remember { mutableStateOf<CapturedImage?>(null) }
     var currentSessionId by remember { mutableStateOf("") }
+    var serverNodeId    by remember { mutableStateOf("") } // ← Server-side id for async sync (fire-and-forget)
     var llmMode          by remember { mutableStateOf(
         LlmMode.valueOf(prefs.getString("llm_mode", "SERVER") ?: "SERVER")
     ) }
     var localModelState  by remember { mutableStateOf(LocalModelState.UNLOADED) }
     var showSettings     by remember { mutableStateOf(false) }
     var contextSections  by remember { mutableStateOf(ContextSectionStore.load(context)) }
+    var learnedEntries   by remember { mutableStateOf(LearningMemoryManager.getAll()) }
 
     var messageFontSize  by remember {
         mutableStateOf(prefs.getFloat("message_font_size", 13f))
@@ -681,13 +686,23 @@ fun ChatScreen(
     fun saveCurrentSession() {
         val cleanMessages = messages.filter { !it.isTyping }
         if (cleanMessages.isEmpty()) return
+        if (currentSessionId.isEmpty()) return
+
+        // ── Local-first: save immediately via ChatSummaryManager ──
         scope.launch(kotlinx.coroutines.Dispatchers.IO) {
-            if (currentSessionId.isEmpty()) {
-                val newId = ChatRepository.saveSession(rawEndpoint, cleanMessages)
-                if (newId.isNotEmpty()) currentSessionId = newId
-            } else {
-                ChatRepository.updateSession(rawEndpoint, currentSessionId, cleanMessages)
-            }
+            ChatSummaryManager.saveSession(cleanMessages, currentSessionId)
+        }
+
+        // ── Server sync: async fire-and-forget, not required for success ──
+        scope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            try {
+                if (serverNodeId.isEmpty()) {
+                    val nodeId = ChatRepository.saveSession(rawEndpoint, cleanMessages)
+                    if (nodeId.isNotEmpty()) serverNodeId = nodeId
+                } else {
+                    ChatRepository.updateSession(rawEndpoint, serverNodeId, cleanMessages)
+                }
+            } catch (_: Exception) {}
         }
     }
 
@@ -945,6 +960,15 @@ fun ChatScreen(
     fun sendMessage() {
         val text = inputText.trim()
         if (text.isEmpty() && pendingImage == null || isWaiting) return
+
+        // ── Learning Memory: explicit /learn or /remember trigger only ──
+        if (text.isNotEmpty()) LearningMemoryManager.extractAndStore(text)
+
+        // ── Local Session ID: generate UUID at the first message of a new chat ──
+        if (currentSessionId.isEmpty()) {
+            currentSessionId = java.util.UUID.randomUUID().toString()
+        }
+
         val capturedImage = pendingImage
         messages.add(ChatMessage(
             text   = if (text.isEmpty()) "📷 Image sent" else text,
@@ -1058,6 +1082,7 @@ fun ChatScreen(
         saveCurrentSession()
         messages.clear()
         currentSessionId = ""
+        serverNodeId = ""
         ChatSessionState.clear()
         cohereProvider.clearHistory()
         dahlProvider.clearHistory()
@@ -1076,6 +1101,11 @@ fun ChatScreen(
             }
         }
         initProvider()
+    }
+
+    // Reload learned memory entries every time the settings sheet opens
+    LaunchedEffect(showSettings) {
+        if (showSettings) learnedEntries = LearningMemoryManager.getAll()
     }
 
     DisposableEffect(Unit) {
@@ -1380,15 +1410,17 @@ fun ChatScreen(
                 onLoad    = { loadSession(it) },
                 onDelete  = { id ->
                     scope.launch(kotlinx.coroutines.Dispatchers.IO) {
-                        val ok = ChatRepository.deleteSession(rawEndpoint, id)
-                        if (ok) {
-                            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
-                                if (currentSessionId == id) {
-                                    messages.clear()
-                                    currentSessionId = ""
-                                }
-                                refreshHistoryTrigger++
+                        // ── Local delete first (immediate) ──
+                        ChatSummaryManager.deleteSession(id)
+                        // ── Server delete secondary (fire-and-forget) ──
+                        try { ChatRepository.deleteSession(rawEndpoint, id) } catch (_: Exception) {}
+                        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                            if (currentSessionId == id) {
+                                messages.clear()
+                                currentSessionId = ""
+                                serverNodeId = ""
                             }
+                            refreshHistoryTrigger++
                         }
                     }
                 },
@@ -1494,6 +1526,11 @@ fun ChatScreen(
                             onDismiss = { showSettings = false },
                             sections = contextSections,
                             onSectionsRefresh = { refreshSections() },
+                            learnedEntries = learnedEntries,
+                            onDeleteEntry = { id ->
+                                LearningMemoryManager.deleteEntry(id)
+                                learnedEntries = LearningMemoryManager.getAll()
+                            },
                             messageFontSize = messageFontSize,
                             onMessageFontSizeChange = { newSize ->
                                 messageFontSize = newSize
@@ -1877,10 +1914,30 @@ private fun HudHistorySheet(
 
     fun refresh() {
         historyScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-            val result = ChatRepository.fetchSessions(ep, context)
-            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
-                sessions = result
+            // ── Local-first: ChatSummaryManager is the immediate primary source ──
+            val local = ChatSummaryManager.getAllSummaries().map { summary ->
+                ChatSession(
+                    id = summary.sessionId,
+                    title = summary.title,
+                    messages = ChatSummaryManager.getFullSession(summary.sessionId) ?: emptyList(),
+                    createdAt = summary.updatedAt
+                )
             }
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                sessions = local
+            }
+
+            // ── Background remote merge (non-blocking, never fails the list) ──
+            try {
+                val remote = ChatRepository.fetchSessions(ep, context)
+                if (remote.isNotEmpty()) {
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                        val localIds = sessions.map { it.id }.toSet()
+                        sessions = (local + remote.filter { it.id !in localIds })
+                            .sortedByDescending { it.createdAt }
+                    }
+                }
+            } catch (_: Exception) {}
         }
     }
 
@@ -2076,6 +2133,8 @@ private fun HudSettingsSheet(
     onDismiss:       () -> Unit,
     sections:     List<ContextSection> = emptyList(),
     onSectionsRefresh: () -> Unit = {},
+    learnedEntries: List<LearningMemoryManager.MemoryEntry> = emptyList(),
+    onDeleteEntry: (String) -> Unit = {},
     currentLocalProvider: LocalLlmProviderType = LocalLlmProviderType.GEMMA_4B,
     cohereApiKey: String = "",
     cohereModel: String = "command-a-plus-05-2026",
@@ -2658,6 +2717,91 @@ private fun HudSettingsSheet(
                         letterSpacing = 1.sp,
                         fontFamily = AppFontFamily
                     )
+                }
+            }
+        }
+
+        // ═══════════════════════════════════════════════════════════
+        //  LEARNED MEMORY — items saved via /learn or /remember
+        // ═══════════════════════════════════════════════════════════
+        ExpandableSection(
+            title = "◈ LEARNED MEMORY  //  ${learnedEntries.size}",
+            accent = NeonGreen,
+            initiallyExpanded = true
+        ) {
+            Spacer(Modifier.height(8.dp))
+
+            if (learnedEntries.isEmpty()) {
+                Box(
+                    modifier = Modifier.fillMaxWidth().height(60.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        "// NO LEARNED ENTRIES",
+                        fontSize = 9.sp,
+                        color = TextMuted,
+                        letterSpacing = 1.sp,
+                        fontFamily = AppFontFamily
+                    )
+                }
+            } else {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 220.dp)
+                        .verticalScroll(rememberScrollState())
+                ) {
+                    learnedEntries.forEach { entry ->
+                        val (tag, tagColor) = when (entry.type) {
+                            LearningMemoryManager.MemoryEntry.Type.PROHIBITION ->
+                                "[RULE]" to AccentPink
+                            LearningMemoryManager.MemoryEntry.Type.FACT ->
+                                "[FACT]" to NeonCyan
+                            else ->
+                                "[PREF]" to NeonGreen
+                        }
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 6.dp, horizontal = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text       = tag,
+                                fontSize   = 8.sp,
+                                color      = tagColor,
+                                fontFamily = AppFontFamily,
+                                modifier   = Modifier.padding(end = 6.dp)
+                            )
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    entry.text,
+                                    color = TextPrimary,
+                                    fontSize = 10.sp,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                    fontFamily = AppFontFamily
+                                )
+                                Text(
+                                    ChatRepository.formatDate(entry.timestamp),
+                                    color = TextMuted,
+                                    fontSize = 7.sp,
+                                    letterSpacing = 0.5.sp,
+                                    fontFamily = AppFontFamily
+                                )
+                            }
+                            Spacer(Modifier.width(6.dp))
+                            IconButton(onClick = { onDeleteEntry(entry.id) }) {
+                                Icon(
+                                    Icons.Default.Delete,
+                                    contentDescription = "Delete entry",
+                                    tint = AccentPink,
+                                    modifier = Modifier.size(15.dp)
+                                )
+                            }
+                        }
+                        Divider(color = CardBorder, thickness = 0.5.dp)
+                    }
                 }
             }
         }

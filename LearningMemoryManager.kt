@@ -32,29 +32,54 @@ object LearningMemoryManager {
     }
 
     /**
-     * Extracts patterns from user text and stores them if valid.
+     * Stores user text ONLY when it explicitly starts with /learn or /remember.
+     * Any other message is completely ignored (explicit trigger, no pattern matching).
      */
     fun extractAndStore(userText: String) {
         val normalized = userText.trim()
-        if (normalized.length < 5 || normalized.length > MAX_CHARS_PER_ENTRY) return
+        if (normalized.isEmpty()) return
 
-        val type = detectType(normalized) ?: return
-        
+        val lower = normalized.lowercase()
+        val prefixLen = when {
+            lower.startsWith("/learn") && isCleanPrefix(normalized, 6) -> 6
+            lower.startsWith("/remember") && isCleanPrefix(normalized, 9) -> 9
+            else -> return
+        }
+
+        // Strip the prefix and any ":" or spaces right after it
+        var content = normalized.substring(prefixLen).trimStart()
+        if (content.startsWith(":")) content = content.substring(1).trimStart()
+        content = content.trim()
+
+        // Too short / too long -> ignore
+        if (content.length < 3 || content.length > MAX_CHARS_PER_ENTRY) return
+
         // Simple deduplication check
         val existing = getAll()
-        if (existing.any { it.text.equals(normalized, ignoreCase = true) }) return
+        if (existing.any { it.text.equals(content, ignoreCase = true) }) return
 
         val entry = MemoryEntry(
             id = System.currentTimeMillis().toString(),
-            text = normalized,
-            type = type,
+            text = content,
+            type = detectType(content),
             timestamp = System.currentTimeMillis()
         )
 
         saveEntry(entry)
     }
 
-    private fun detectType(text: String): MemoryEntry.Type? {
+    // Ensures the trigger is followed by end-of-text, whitespace or ":" so "/learnX" doesn't count
+    private fun isCleanPrefix(text: String, prefixLen: Int): Boolean {
+        if (text.length == prefixLen) return true
+        val next = text[prefixLen]
+        return next == ' ' || next == '\t' || next == ':'
+    }
+
+    /**
+     * Classifies only the shape of the content (used for [RULE]/[PREF]/[FACT] tags).
+     * Falls back to PREFERENCE when nothing matches — never rejects.
+     */
+    private fun detectType(text: String): MemoryEntry.Type {
         val lower = text.lowercase()
         
         // Prohibitions (Don't, Never, Stop, Mat..., La...)
@@ -84,7 +109,7 @@ object LearningMemoryManager {
             return MemoryEntry.Type.FACT
         }
 
-        return null
+        return MemoryEntry.Type.PREFERENCE
     }
 
     private fun saveEntry(entry: MemoryEntry) {
@@ -127,6 +152,20 @@ object LearningMemoryManager {
             )
         }
         return list
+    }
+
+    fun deleteEntry(id: String) {
+        val entries = getAll().filter { it.id != id }
+        val jsonArray = JSONArray()
+        entries.forEach { e ->
+            JSONObject().apply {
+                put("id", e.id)
+                put("text", e.text)
+                put("type", e.type.name)
+                put("timestamp", e.timestamp)
+            }.let { jsonArray.put(it) }
+        }
+        prefs.edit().putString(KEY_ENTRIES, jsonArray.toString()).apply()
     }
 
     fun clear() {

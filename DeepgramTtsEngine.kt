@@ -61,6 +61,12 @@ class DeepgramTtsEngine(
     private val pendingSentences = AtomicInteger(0)
     private var utteranceCounter = 0
 
+    // ← حالة نجاح/فشل آخر تشغيل — بيستخدمها الـ caller (مثل إعلان الإشعارات)
+    //   عشان يعمل fallback لمحرك تاني لو الـ API فشل.
+    @Volatile
+    var lastPlaybackFailed: Boolean = false
+        private set
+
     private var audioTrack: AudioTrack? = null
     private val audioTrackLock = Object()
 
@@ -142,6 +148,7 @@ class DeepgramTtsEngine(
     private fun fetchAndPlayInternal(text: String, utteranceId: String, onDone: () -> Unit, isLast: Boolean) {
         Thread {
             try {
+                lastPlaybackFailed = false
                 val url = "https://api.deepgram.com/v1/speak?model=$resolvedModel&encoding=linear16&sample_rate=$SAMPLE_RATE&container=none"
 
                 val request = Request.Builder()
@@ -158,6 +165,7 @@ class DeepgramTtsEngine(
 
                 if (!response.isSuccessful || response.body == null) {
                     Log.e(TAG, "Deepgram API error [$utteranceId]: ${response.code} ${response.message}")
+                    lastPlaybackFailed = true
                     response.close()
                     Handler(Looper.getMainLooper()).post { onDone() }
                     cleanupAfterPlayback()
@@ -199,11 +207,13 @@ class DeepgramTtsEngine(
 
             } catch (e: IOException) {
                 Log.e(TAG, "Network error [$utteranceId]: ${e.message}", e)
+                lastPlaybackFailed = true
                 Handler(Looper.getMainLooper()).post { onDone() }
                 cleanupAfterPlayback()
                 processQueue()
             } catch (e: Exception) {
                 Log.e(TAG, "Unexpected error [$utteranceId]: ${e.message}", e)
+                lastPlaybackFailed = true
                 Handler(Looper.getMainLooper()).post { onDone() }
                 cleanupAfterPlayback()
                 processQueue()

@@ -69,6 +69,7 @@ import com.example.app_abdelbaset.ui.theme.NeonCyan
 import com.example.app_abdelbaset.ui.theme.AccentPink
 import com.example.app_abdelbaset.ui.theme.AccentAmber
 import com.example.app_abdelbaset.ChatSession
+import com.axon.mobile.core.memory.LearningMemoryManager
 
 private enum class Screen { MAIN, SETTINGS, CHAT, WIDGET, PAIR_DESKTOP ,NOTIFICATION_RULES}
 
@@ -232,6 +233,7 @@ class MainActivity : ComponentActivity() {
         // ═══════════════════════════════════════════════════════════════
         SystemPromptManager.init(applicationContext)
         ChatSummaryManager.init(applicationContext)  // ← NEW: Initialize Chat Summary Manager
+        LearningMemoryManager.init(applicationContext) // ← NEW: Initialize Learning Memory Manager
 
         WindowCompat.setDecorFitsSystemWindows(window, false)
         selectedEndpoint = prefs.getString(PREF_ENDPOINT, PRESET_ENDPOINTS[0]) ?: PRESET_ENDPOINTS[0]

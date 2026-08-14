@@ -2,6 +2,7 @@ package com.example.app_abdelbaset
 
 import android.content.Context
 import android.content.SharedPreferences
+import com.axon.mobile.core.memory.LearningMemoryManager
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -161,14 +162,21 @@ Available functions:
     fun getEffectivePromptWithContext(): String? {
         val base = getEffectivePrompt() ?: return null
         if (!::appContext.isInitialized) return base
+
+        val learnedBlock = LearningMemoryManager.getBlock()
         val sections = ContextSectionStore.load(appContext)
             .filter { it.content.isNotBlank() }
             .sortedBy { it.order }
-        if (sections.isEmpty()) return base
 
-        val ctxBlock = sections.joinToString("\n\n") { "## ${it.title}\n${it.content}" }
+        if (learnedBlock.isBlank() && sections.isEmpty()) return base
 
-        return """$base
+        val sb = StringBuilder(base)
+        if (learnedBlock.isNotBlank()) {
+            sb.append("\n\n").append(learnedBlock.trimEnd())
+        }
+        if (sections.isNotEmpty()) {
+            val ctxBlock = sections.joinToString("\n\n") { "## ${it.title}\n${it.content}" }
+            sb.append("""
 
 --- KNOWLEDGE BASE ---
 $ctxBlock
@@ -176,7 +184,9 @@ $ctxBlock
 
 CRITICAL RULE: If the user asks about something covered in the KNOWLEDGE BASE above, answer ONLY from it.
 If the information is not in the KNOWLEDGE BASE, say: "I don't have that information."
-Do NOT use outside knowledge to answer KNOWLEDGE BASE-related questions."""
+Do NOT use outside knowledge to answer KNOWLEDGE BASE-related questions.""")
+        }
+        return sb.toString()
     }
 
     /**
@@ -186,20 +196,29 @@ Do NOT use outside knowledge to answer KNOWLEDGE BASE-related questions."""
      */
     fun getContextBlock(): String? {
         if (!::appContext.isInitialized) return null
+
+        val learnedBlock = LearningMemoryManager.getBlock()
         val sections = ContextSectionStore.load(appContext)
             .filter { it.content.isNotBlank() }
             .sortedBy { it.order }
-        if (sections.isEmpty()) return null
 
-        val ctxBlock = sections.joinToString("\n\n") { "## ${it.title}\n${it.content}" }
-        return """
---- KNOWLEDGE BASE ---
+        if (learnedBlock.isBlank() && sections.isEmpty()) return null
+
+        val sb = StringBuilder()
+        if (learnedBlock.isNotBlank()) {
+            sb.append(learnedBlock.trimEnd()).append("\n\n")
+        }
+        if (sections.isNotEmpty()) {
+            val ctxBlock = sections.joinToString("\n\n") { "## ${it.title}\n${it.content}" }
+            sb.append("""--- KNOWLEDGE BASE ---
 $ctxBlock
 --- END KNOWLEDGE BASE ---
 
 CRITICAL RULE: If the user asks about something covered in the KNOWLEDGE BASE above, answer ONLY from it.
 If the information is not in the KNOWLEDGE BASE, say: "I don't have that information."
-Do NOT use outside knowledge to answer KNOWLEDGE BASE-related questions."""
+Do NOT use outside knowledge to answer KNOWLEDGE BASE-related questions.""")
+        }
+        return sb.toString()
     }
 
     fun getMaxContextChars(): Int = MAX_CONTEXT_CHARS
