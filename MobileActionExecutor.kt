@@ -241,7 +241,7 @@ class MobileActionExecutor(private val context: Context) {
                         params.optString("name", ""),
                         params.optString("number", "")
                     )
-                    "contact_search"   -> searchContact(params.optString("name", ""))
+                    "contact_search"   -> searchContact(params.optString("name", ""), safeOnResult)
 
                     // ── System Info ─────────────────────────────────────
                     "battery_status"   -> batteryStatus()
@@ -1246,14 +1246,38 @@ class MobileActionExecutor(private val context: Context) {
         showToast("Contact added: $name")
     }
 
-    private fun searchContact(name: String) {
+    private fun searchContact(name: String, onResult: (String) -> Unit = {}) {
         if (name.isBlank()) return
-        val intent = Intent(Intent.ACTION_VIEW).apply {
-            data = Uri.withAppendedPath(ContactsContract.Contacts.CONTENT_FILTER_URI, Uri.encode(name))
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+
+        val hasContactsPermission = ContextCompat.checkSelfPermission(
+            context, Manifest.permission.READ_CONTACTS
+        ) == PackageManager.PERMISSION_GRANTED
+
+        if (hasContactsPermission) {
+            val number = lookupContactNumber(name)
+            if (!number.isNullOrBlank()) {
+                val msg = "$name's number is $number"
+                Log.d(TAG, "Contact search: $name → $number")
+                showToast(msg)
+                speakText(msg)
+                onResult("Found: $name - $number")
+                return
+            }
+            val notFound = "No phone number found for $name"
+            Log.d(TAG, "Contact search: $name → not found")
+            showToast(notFound)
+            speakText(notFound)
+            onResult(notFound)
+        } else {
+            Log.w(TAG, "READ_CONTACTS permission missing — requesting")
+            showToast("Requesting contacts permission")
+            val intent = Intent("com.example.app_abdelbaset.REQUEST_CONTACTS_PERMISSION").apply {
+                putExtra("name", name)
+                setPackage(context.packageName)
+            }
+            context.sendBroadcast(intent)
+            onResult("Contacts permission not granted; please grant it and ask again for $name")
         }
-        context.startActivity(intent)
-        Log.d(TAG, "Contact search: $name")
     }
 
     // ═════════════════════════════════════════════════════════════════════

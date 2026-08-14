@@ -10,6 +10,7 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.ContactsContract
 import android.provider.Settings
 import android.util.Log
 import android.widget.Toast
@@ -84,6 +85,7 @@ class MainActivity : ComponentActivity() {
     private var diagnosticResult   by mutableStateOf<DiagnosticResult?>(null)
     private var errorLogPath       by mutableStateOf("")
     private var pendingCallNumber: String = ""
+    private var pendingContactSearchName: String = ""
 
     private val prefs by lazy { getSharedPreferences("axon_prefs", Context.MODE_PRIVATE) }
     private val pairingManager by lazy { PairingManager(applicationContext) }
@@ -135,8 +137,10 @@ class MainActivity : ComponentActivity() {
         private const val PREF_DEEPGRAM_API_KEY = "deepgram_api_key"
         private const val PREF_DEEPGRAM_TTS_KEY = "deepgram_tts_api_key"
         private const val PREF_DEEPGRAM_TTS_VOICE = "deepgram_tts_voice"
+        const val DEFAULT_DEEPGRAM_TTS_VOICE = "aura-2-odysseus-en"
         private const val PREF_SERVER_CONNECT_ENABLED = "server_connect_enabled"
         private const val REQUEST_CALL_PERMISSION = 1001
+        private const val REQUEST_CONTACTS_PERMISSION = 1002
         @JvmStatic
         private var sharedTtsEngine: TtsEngine? = null
 
@@ -147,6 +151,38 @@ class MainActivity : ComponentActivity() {
 
         @JvmStatic
         fun getSharedTtsEngine(): TtsEngine? = sharedTtsEngine
+
+        // ── Factory: يبني الـ TTS engine المختار من الـ prefs (بيشتغل من غير ما الـ Activity يكون موجودة) ──
+        @JvmStatic
+        fun buildTtsEngine(context: Context): TtsEngine? {
+            val prefs = context.getSharedPreferences("axon_prefs", Context.MODE_PRIVATE)
+            val engineType = try {
+                TtsEngineType.valueOf(prefs.getString(PREF_TTS_ENGINE, "ANDROID_TTS") ?: "ANDROID_TTS")
+            } catch (_: Exception) { TtsEngineType.ANDROID_TTS }
+            return when (engineType) {
+                TtsEngineType.ANDROID_TTS -> {
+                    val pkg = prefs.getString(PREF_ANDROID_TTS_PKG, "") ?: ""
+                    LocalTtsEngine(context, pkg.ifEmpty { null })
+                }
+                TtsEngineType.SHERPA_SUPERTONIC, TtsEngineType.SHERPA_VITS_PIPER -> {
+                    SherpaTtsEngine(context, engineType).apply {
+                        modelDir = prefs.getString(PREF_TTS_MODEL_DIR, "").orEmpty().ifEmpty {
+                            when (engineType) {
+                                TtsEngineType.SHERPA_SUPERTONIC -> SherpaTtsEngine.DEFAULT_SUPERTONIC_DIR
+                                else -> SherpaTtsEngine.DEFAULT_VITS_DIR
+                            }
+                        }
+                        init()
+                    }
+                }
+                TtsEngineType.DEEPGRAM_TTS -> {
+                    val apiKey = prefs.getString(PREF_DEEPGRAM_TTS_KEY, "") ?: ""
+                    val voice = prefs.getString(PREF_DEEPGRAM_TTS_VOICE, DEFAULT_DEEPGRAM_TTS_VOICE)
+                        ?: DEFAULT_DEEPGRAM_TTS_VOICE
+                    DeepgramTtsEngine(context, apiKey, voice)
+                }
+            }
+        }
 
 
         val PRESET_ENDPOINTS = listOf(
@@ -250,6 +286,13 @@ class MainActivity : ComponentActivity() {
             registerReceiver(callPermissionReceiver, callFilter, RECEIVER_NOT_EXPORTED)
         else
             registerReceiver(callPermissionReceiver, callFilter)
+
+        // Register contacts permission receiver
+        val contactsFilter = IntentFilter("com.example.app_abdelbaset.REQUEST_CONTACTS_PERMISSION")
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
+            registerReceiver(contactsPermissionReceiver, contactsFilter, RECEIVER_NOT_EXPORTED)
+        else
+            registerReceiver(contactsPermissionReceiver, contactsFilter)
 
         permissionsGranted = checkAllPermissions()
         overlayPermGranted = checkOverlayPermission()
@@ -455,6 +498,45 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    // ── Contacts Permission Receiver ──────────────────────────────────
+    private val contactsPermissionReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == "com.example.app_abdelbaset.REQUEST_CONTACTS_PERMISSION") {
+                pendingContactSearchName = intent.getStringExtra("name") ?: ""
+                if (pendingContactSearchName.isNotBlank()) {
+                    androidx.core.app.ActivityCompat.requestPermissions(
+                        this@MainActivity,
+                        arrayOf(Manifest.permission.READ_CONTACTS),
+                        REQUEST_CONTACTS_PERMISSION
+                    )
+                }
+            }
+        }
+    }
+
+    private fun lookupAndSpeakContactNumber(name: String) {
+        val uri = ContactsContract.CommonDataKinds.Phone.CONTENT_URI
+        val projection = arrayOf(
+            ContactsContract.CommonDataKinds.Phone.NUMBER,
+            ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME
+        )
+        val selection = "${ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME} LIKE ?"
+        val args = arrayOf("%$name%")
+        var number: String? = null
+        contentResolver.query(uri, projection, selection, args, null)?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                number = cursor.getString(cursor.getColumnIndexOrThrow(
+                    ContactsContract.CommonDataKinds.Phone.NUMBER
+                ))
+            }
+        }
+        val msg = if (!number.isNullOrBlank()) "$name's number is $number"
+        else "No phone number found for $name"
+        Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
+        val tts = buildTtsEngine(applicationContext)
+        tts?.speak(msg, true) { tts.release() }
+    }
+
     override fun onRequestPermissionsResult(
         requestCode: Int,
         permissions: Array<out String>,
@@ -477,6 +559,17 @@ class MainActivity : ComponentActivity() {
                     Toast.makeText(this, "Call permission denied", Toast.LENGTH_SHORT).show()
                 }
             }
+
+            REQUEST_CONTACTS_PERMISSION -> {
+                if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                    if (pendingContactSearchName.isNotBlank()) {
+                        lookupAndSpeakContactNumber(pendingContactSearchName)
+                        pendingContactSearchName = ""
+                    }
+                } else {
+                    Toast.makeText(this, "Contacts permission denied", Toast.LENGTH_SHORT).show()
+                }
+            }
         }
     }
 
@@ -492,6 +585,7 @@ class MainActivity : ComponentActivity() {
         super.onDestroy()
         unregisterReceiver(serviceStatusReceiver)
         unregisterReceiver(callPermissionReceiver)
+        unregisterReceiver(contactsPermissionReceiver)
     }
     private fun onAndroidTtsEngineSelected(pkg: String) {
         selectedAndroidTtsEnginePkg = pkg
@@ -745,34 +839,14 @@ class MainActivity : ComponentActivity() {
     }
 
     // دالة عشان تستخدمها في MicForegroundService
-    // In MainActivity.kt, line 507 area - change this:
     fun getActiveTtsEngine(): TtsEngine? {
-        return when(selectedTtsEngine) {
-            TtsEngineType.ANDROID_TTS -> {
-                // ← بعتنا الـ package هنا
-                LocalTtsEngine(applicationContext, selectedAndroidTtsEnginePkg.ifEmpty { null })
+        if (selectedTtsEngine == TtsEngineType.SHERPA_SUPERTONIC || selectedTtsEngine == TtsEngineType.SHERPA_VITS_PIPER) {
+            if (sherpaTtsEngine == null || !sherpaTtsEngine!!.isReady) {
+                sherpaTtsEngine = buildTtsEngine(applicationContext) as? SherpaTtsEngine
             }
-            TtsEngineType.SHERPA_SUPERTONIC, TtsEngineType.SHERPA_VITS_PIPER -> {
-                if (sherpaTtsEngine == null || !sherpaTtsEngine!!.isReady) {
-                    sherpaTtsEngine = SherpaTtsEngine(applicationContext, selectedTtsEngine).apply {
-                        modelDir = customModelDir.ifEmpty {
-                            when(selectedTtsEngine) {
-                                TtsEngineType.SHERPA_SUPERTONIC -> SherpaTtsEngine.DEFAULT_SUPERTONIC_DIR
-                                TtsEngineType.SHERPA_VITS_PIPER -> SherpaTtsEngine.DEFAULT_VITS_DIR
-                                else -> SherpaTtsEngine.DEFAULT_SUPERTONIC_DIR
-                            }
-                        }
-                        init()
-                    }
-                }
-                sherpaTtsEngine
-            }
-            TtsEngineType.DEEPGRAM_TTS -> {
-                val apiKey = prefs.getString(PREF_DEEPGRAM_TTS_KEY, "") ?: ""
-                val voice = prefs.getString(PREF_DEEPGRAM_TTS_VOICE, "aura-2-odysseus-en") ?: "aura-2-odysseus-en"
-                DeepgramTtsEngine(applicationContext, apiKey, voice, "aura-2")
-            }
+            return sherpaTtsEngine
         }
+        return buildTtsEngine(applicationContext)
     }
 }
 
@@ -2094,11 +2168,11 @@ fun SettingsScreen(
 
                     Spacer(Modifier.height(6.dp))
 
-                    var draftVoice by remember { mutableStateOf(prefs.getString("deepgram_tts_voice", "aura-2-odysseus-en") ?: "aura-2-odysseus-en") }
+                    var draftVoice by remember { mutableStateOf(prefs.getString("deepgram_tts_voice", MainActivity.DEFAULT_DEEPGRAM_TTS_VOICE) ?: MainActivity.DEFAULT_DEEPGRAM_TTS_VOICE) }
                     OutlinedTextField(
                         value = draftVoice,
                         onValueChange = { draftVoice = it },
-                        label = { Text("VOICE (e.g., aura-2-odysseus-en, aurora, olive, aria)", fontSize = 8.sp,
+                        label = { Text("VOICE (e.g., aura-2-odysseus-en or odysseus)", fontSize = 8.sp,
                             color = TextMuted, fontFamily = AppFontFamily) },
                         singleLine = true, modifier = Modifier.fillMaxWidth(),
                         colors = OutlinedTextFieldDefaults.colors(
@@ -2127,7 +2201,7 @@ fun SettingsScreen(
                     }
 
                     Spacer(Modifier.height(4.dp))
-                    Text("// Voices: aura-2-odysseus-en, aurora, olive, aria, nova, jupiter, etc.", fontSize = 7.sp, color = TextMuted.copy(0.5f),
+                    Text("// Voice: اكتب الـ ID الكامل زي aura-2-odysseus-en (default) أو اسم قصير زي odysseus", fontSize = 7.sp, color = TextMuted.copy(0.5f),
                         fontFamily = AppFontFamily)
                 }
 

@@ -230,6 +230,9 @@ class SherpaTtsEngine(
                         1 // Continue
                     }
                 )
+                // ← استنى الـ AudioTrack يخلص الـ buffer الداخلي قبل الـ stop
+                // عشان ذيل آخر كلمة متتقطعش (نفس الـ drain بتاع Deepgram)
+                waitForTrackDrain(engine.sampleRate())
                 Handler(Looper.getMainLooper()).post { onDone() }
                 val remaining = pendingSentences.decrementAndGet()
                 if (remaining <= 0) {
@@ -263,7 +266,7 @@ class SherpaTtsEngine(
         audioTrack = AudioTrack.Builder()
             .setAudioAttributes(
                 AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_MEDIA)
+                    .setUsage(AudioAttributes.USAGE_ASSISTANT) // ← يتبع AI Assistant volume
                     .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                     .build()
             )
@@ -278,6 +281,19 @@ class SherpaTtsEngine(
             .setTransferMode(AudioTrack.MODE_STREAM)
             .build()
         audioTrack?.play()
+    }
+
+    // ── استكمال الذيل (tail drain) ─────────────────────────────────
+    // write() بتُرجع قبل ما الصوت يخلص تشغيل فعلي، فنستنى مدة الـ buffer
+    // (+ هامش) قبل الـ stop/release عشان آخر نبرة متقتطعش. بنتخطى لو barge-in.
+    private fun waitForTrackDrain(sampleRate: Int) {
+        if (!isPlaying.get()) return
+        if (sampleRate <= 0) return
+        val drainMs = synchronized(audioTrackLock) {
+            val track = audioTrack ?: return
+            track.bufferSizeInFrames * 1000L / sampleRate + 120
+        }
+        Thread.sleep(drainMs)
     }
 
     private fun processQueue() {

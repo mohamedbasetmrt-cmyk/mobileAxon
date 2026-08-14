@@ -17,7 +17,7 @@ class LocalVoiceSession(
     private val onLlmResponse: (String) -> Unit = {},
     private val onProgress: (String) -> Unit = {},
     private val onError: (String) -> Unit = {},
-    private val prewarmedTts: LocalTtsEngine? = null,
+    private val prewarmedTts: TtsEngine? = null,
 ) {
     enum class State { IDLE, STREAMING_STT, LLM_THINKING, TTS_PLAYING, ERROR }
 
@@ -42,7 +42,7 @@ class LocalVoiceSession(
     private var deepgramEngine: DeepgramSttEngine? = null
     private var useOnlineSTT = false
     private var vadEngine: LocalVadEngine? = null
-    private var ttsEngine: LocalTtsEngine? = null
+    private var ttsEngine: TtsEngine? = null
     private var sttPulseJob: Job? = null
 
     // ── NEW: Conversation Manager ──
@@ -70,6 +70,17 @@ class LocalVoiceSession(
 
     // ── NEW: هل اتنطقت جمل أثناء الـ streaming (منع إعادة الرد كامل) ──
     private var streamedAnySentence = false
+
+    // ── NEW: تنظيف خرج الـ LLM قبل النطق (تاج <think> والعلامة *) ──
+    private var inThinkBlock = false
+    private val thinkTagBuffer = StringBuilder()
+
+    // ── NEW: إغلاق الجلسة بعد نطق الوداع (Goodbye) ──
+    private var closeSessionAfterSpeech = false
+
+    // ── مانع "قيامة الجلسة": بعد الإغلاق، أي إشارة متأخرة من الـ LLM/CM
+    // (مثلاً LISTENING من صدى الصوت أو سترايم متأخر) متفتحش الجلسة تاني ──
+    private var isSessionClosed = false
 
     private fun sendTextToOrb(text: String) {
         val intent = android.content.Intent("com.example.app_abdelbaset.ORB_TEXT")
@@ -105,7 +116,7 @@ class LocalVoiceSession(
                 vadEngine = vad
 
                 // 2. Init TTS
-                val tts = prewarmedTts ?: LocalTtsEngine(context)
+                val tts = prewarmedTts ?: MainActivity.buildTtsEngine(context) ?: LocalTtsEngine(context)
                 val ttsDeferred = if (prewarmedTts == null) async { tts.init() } else null
                 ttsEngine = tts
                 val ttsOk = ttsDeferred?.await() ?: true
@@ -141,14 +152,18 @@ class LocalVoiceSession(
                         echoCancellationEnabled = true
                     ),
                     onStateChange = { convState ->
-                        val mapped = when (convState) {
-                            ConversationManager.ConversationState.IDLE -> State.IDLE
-                            ConversationManager.ConversationState.LISTENING -> State.STREAMING_STT
-                            ConversationManager.ConversationState.THINKING -> State.LLM_THINKING
-                            ConversationManager.ConversationState.SPEAKING -> State.TTS_PLAYING
-                            ConversationManager.ConversationState.BARGE_IN -> State.STREAMING_STT
+                        // بعد إغلاق الجلسة نتجاهل أي تغيير حالة متأخر (LISTENING
+                        // من صدى أو مقاطعة) عشان الجلسة متفتحش من غير wake word
+                        if (!isSessionClosed) {
+                            val mapped = when (convState) {
+                                ConversationManager.ConversationState.IDLE -> State.IDLE
+                                ConversationManager.ConversationState.LISTENING -> State.STREAMING_STT
+                                ConversationManager.ConversationState.THINKING -> State.LLM_THINKING
+                                ConversationManager.ConversationState.SPEAKING -> State.TTS_PLAYING
+                                ConversationManager.ConversationState.BARGE_IN -> State.STREAMING_STT
+                            }
+                            currentState = mapped
                         }
-                        currentState = mapped
                     },
                     onUserUtterance = { text ->
                         // Add user message to conversation history
@@ -162,6 +177,9 @@ class LocalVoiceSession(
                         // 1. أوقف الـ TTS فوراً
                         ttsEngine?.stop()
                         isSpeaking = false
+                        // ملاحظة: الفلاج closeSessionAfterSpeech مش بيتلغى هنا —
+                        // لو المستخدم قاطع رد الوداع، الجلسة هتقفل برضه بعد ما
+                        // الرد الجديد يخلص (كلمة الوداع ثابتة لكل الجلسة)
 
                         // 2. ابدأ الاستماع تاني في نفس الـ session
                         startLocalProcessing()
@@ -192,6 +210,8 @@ class LocalVoiceSession(
         currentSessionId = "session_${System.currentTimeMillis()}"
         currentServerNodeId = null
         conversationMessages.clear()
+        closeSessionAfterSpeech = false // ← جلسة جديدة
+        isSessionClosed = false         // ← جلسة جديدة: مفتوحة
 
         startLocalProcessing()
     }
@@ -354,9 +374,13 @@ class LocalVoiceSession(
     }
 
     private fun startLlmStreaming(userText: String) {
+        if (isSessionClosed) return // ← جلسة مقفولة: متقبلش كلام جديد
         currentState = State.LLM_THINKING
         visualizer.setState(VisualizerState.OrbState.THINKING)
         visualizer.setAudioLevel(0f)
+
+        // ← لو المستخدم قال Goodbye، هقفل الجلسة بعد ما الـ TTS يخلص الرد
+        closeSessionAfterSpeech = isGoodbyeCommand(userText)
 
         // ← NEW: Notify conversation manager that thinking started
         conversationManager?.notifyThinkingStarted()
@@ -364,6 +388,8 @@ class LocalVoiceSession(
         jsonBuffer.clear()
         isCollectingJson = false
         jsonExecuted = false
+        inThinkBlock = false
+        thinkTagBuffer.clear()
 
         if (!llmProvider.isReady) {
             onError("LLM provider not ready")
@@ -386,11 +412,14 @@ class LocalVoiceSession(
         llmProvider.sendMessage(
             json = json,
             onChunk = { chunk ->
-                fullResponseBuffer.append(chunk)
-                onLlmResponse(fullResponseBuffer.toString())
+                val cleaned = cleanLlmChunkForSpeech(chunk)
+                if (cleaned.isNotEmpty()) {
+                    fullResponseBuffer.append(cleaned)
+                    onLlmResponse(fullResponseBuffer.toString())
 
-                // Streaming TTS: ابدأ تشمع الجمل وتكلم فوراً
-                processLlmChunkForTts(chunk)
+                    // Streaming TTS: ابدأ تشمع الجمل وتكلم فوراً
+                    processLlmChunkForTts(cleaned)
+                }
             },
             onAction = { actions ->
                 handledByToolCall = true
@@ -477,21 +506,21 @@ class LocalVoiceSession(
                     sendTextToOrb(fullResponse)
                     val tts = ttsEngine
                     if (tts != null) {
-                        tts.markEndOfStream {
-                            conversationManager?.notifySpeakingEnded()
-                            isSpeaking = false
-                        }
+                        tts.markEndOfStream { finishSpeaking() }
                     } else {
-                        conversationManager?.notifySpeakingEnded()
-                        isSpeaking = false
+                        finishSpeaking()
                     }
                 } else if (fullResponse.isNotBlank()) {
                     sendTextToOrb(fullResponse)  // ← NEW
                     speakText(fullResponse, isLast = true)
                 } else {
                     // لو مفيش نص، نبلغ الـ Conversation Manager إن الـ LLM خلص
-                    conversationManager?.notifySpeakingEnded()
-                    transitionToIdle()
+                    if (closeSessionAfterSpeech) {
+                        finishSpeaking()
+                    } else {
+                        conversationManager?.notifySpeakingEnded()
+                        transitionToIdle()
+                    }
                 }
             },
             onError = { err ->
@@ -1276,6 +1305,31 @@ class LocalVoiceSession(
 
 
 
+    // ── الوداع: إغلاق الجلسة ───────────────────────────────────────
+    private val GOODBYE_REGEX = Regex("\\b(goodbye|bye)\\b", RegexOption.IGNORE_CASE)
+
+    private fun isGoodbyeCommand(text: String): Boolean =
+        GOODBYE_REGEX.containsMatchIn(text)
+
+    /**
+     * يُستدعى كل ما نطق الـ TTS يخلص. لو المستخدم قال "Goodbye"،
+     * بعد ما الرد يُقال بالكامل نقفل الجلسة (نحفظ المحادثة + نوقف
+     * الاستماع + نرجع للـ wake word) بدل ما نكمل المحادثة.
+     */
+    private fun finishSpeaking() {
+        isSpeaking = false
+        if (closeSessionAfterSpeech) {
+            closeSessionAfterSpeech = false
+            Log.d(TAG, "Goodbye said — closing local voice session")
+            isSessionClosed = true
+            saveCurrentSession()
+            conversationManager?.stop()
+            transitionToIdle()
+        } else if (!isSessionClosed) {
+            conversationManager?.notifySpeakingEnded()
+        }
+    }
+
     private fun transitionToIdle() {
         if (useOnlineSTT) deepgramEngine?.stop() else sttEngine?.stop()
         vadEngine?.stop()
@@ -1284,6 +1338,8 @@ class LocalVoiceSession(
         jsonBuffer.clear()
         isCollectingJson = false
         jsonExecuted = false
+        inThinkBlock = false
+        thinkTagBuffer.clear()
 
         visualizer.setSpeaking(false)
         visualizer.setListening(false)
@@ -1297,30 +1353,90 @@ class LocalVoiceSession(
         }
     }
 
+    // ── تنظيف خرج الـ LLM قبل النطق ─────────────────────────────────
     /**
-     * تنظيف النص من تاجات think وعلامات * قبل إرساله للـ TTS
+     * بيمسح محتوى <think>...</think> (حتى لو التاج متقسّم على أكثر من chunk)
+     * وبيشيل كل العلامات * من النص، بحيث الـ TTS ميتنطقش أي تفكير داخلي.
      */
-    private fun cleanTextForTts(text: String): String {
-        var cleaned = text
-        
-        // إزالة تاجات <think>...</think>
-        cleaned = cleaned.replace(Regex("<think>.*?</think>", RegexOption.DOT_MATCHES_ALL), "")
-        
-        // إزالة علامات * (المستخدمة للتنسيق في Markdown)
-        cleaned = cleaned.replace("*", "")
-        
-        // إزالة أي مسافات زائدة
-        cleaned = cleaned.trim()
-        
-        return cleaned
+    private fun cleanLlmChunkForSpeech(raw: String): String {
+        val combined = thinkTagBuffer.toString() + raw
+        thinkTagBuffer.clear()
+        if (combined.isEmpty()) return ""
+
+        // لو آخر النص فيه بداية تاج ناقصة (مثلاً "<think" أو "</th") نحتفظ بيها
+        // ونكملها مع الـ chunk الجاي بدل ما تتنطق
+        val (body, pendingTail) = splitPartialTagTail(combined)
+        if (pendingTail.isNotEmpty()) thinkTagBuffer.append(pendingTail)
+
+        val out = StringBuilder(body.length)
+        var i = 0
+        var inside = inThinkBlock
+        while (i < body.length) {
+            if (inside) {
+                val closeIdx = body.indexOf("</think>", i)
+                if (closeIdx == -1) break // باقي النص كله جوه التفكير → امسحه
+                i = closeIdx + 8
+                inside = false
+                continue
+            }
+
+            val openIdx = body.indexOf("<think>", i)
+            val closeIdx = body.indexOf("</think>", i)
+            val nextTag = when {
+                openIdx == -1 && closeIdx == -1 -> -1
+                openIdx == -1 -> closeIdx
+                closeIdx == -1 -> openIdx
+                else -> minOf(openIdx, closeIdx)
+            }
+            if (nextTag == -1) {
+                out.append(body.substring(i))
+                break
+            }
+            out.append(body.substring(i, nextTag))
+            if (openIdx != -1 && (closeIdx == -1 || openIdx <= closeIdx)) {
+                // بداية تفكير جديد → نسقط كل حاجة لحد الغلق
+                inside = true
+                i = nextTag + 7
+            } else {
+                // تاج غلق شارد من غير فتح → نشيله بس
+                i = nextTag + 8
+            }
+        }
+        inThinkBlock = inside
+
+        return out.toString().replace("*", "")
+    }
+
+    // بيرجع (body, tail) بحيث tail أطول ذيل في النص يعتبر بداية ناقصة لتاج
+    private fun splitPartialTagTail(text: String): Pair<String, String> {
+        val openPrefix = "<think>"
+        val closePrefix = "</think>"
+        val maxLen = closePrefix.length - 1 // 7 → أي ذيل أقصر من التاج الكامل
+        for (len in maxLen downTo 1) {
+            val tail = text.takeLast(len)
+            if ((openPrefix.length > len && openPrefix.startsWith(tail)) ||
+                (closePrefix.length > len && closePrefix.startsWith(tail))
+            ) {
+                return text.dropLast(len) to tail
+            }
+        }
+        return text to ""
+    }
+
+    // تنظيف دفاعي لأي نص هيوصل لـ speakText من غير مسار الـ streaming
+    private fun cleanForSpeech(text: String): String {
+        return text
+            .replace(Regex("<think>.*?</think>", RegexOption.DOT_MATCHES_ALL), "")
+            .replace("<think>", "")
+            .replace("</think>", "")
+            .replace("*", "")
+            .replace(Regex(" {2,}"), " ") // مسافات مكررة من حدود الـ chunks
+            .trim()
     }
 
     private fun processLlmChunkForTts(chunk: String) {
-        // تنظيف الـ chunk من التاجات والعلامات قبل المعالجة
-        val cleanedChunk = cleanTextForTts(chunk)
-        if (cleanedChunk.isBlank()) return
-        
-        sentenceBuffer.append(cleanedChunk)
+        if (isSessionClosed) return // ← سترايم متأخر بعد الإغلاق: متتكلمش
+        sentenceBuffer.append(chunk)
         var text = sentenceBuffer.toString()
 
         // أول جملة، نبلغ الـ Conversation Manager إننا بدأنا الكلام
@@ -1359,27 +1475,24 @@ class LocalVoiceSession(
     }
 
     private fun speakText(text: String, isLast: Boolean) {
-        // تنظيف النص قبل النطق (إزالة تاجات think وعلامات *)
-        val cleanedText = cleanTextForTts(text)
-        if (cleanedText.isBlank()) {
-            if (isLast) {
-                conversationManager?.notifySpeakingEnded()
-                isSpeaking = false
-            }
+        if (isSessionClosed) {
+            if (isLast) finishSpeaking() // بيكمل مسار الإغلاق لو نده حد
+            return
+        }
+        val cleaned = cleanForSpeech(text)
+        if (cleaned.isBlank()) {
+            if (isLast) finishSpeaking()
             return
         }
 
         // ── NEW: Prevent duplicate TTS playback ──
         val currentTime = System.currentTimeMillis()
-        if (cleanedText == lastSpokenText && (currentTime - ttsSpeakTime) < 3000) {
+        if (cleaned == lastSpokenText && (currentTime - ttsSpeakTime) < 3000) {
             Log.d(TAG, "TTS: Skipping duplicate text")
-            if (isLast) {
-                conversationManager?.notifySpeakingEnded()
-                isSpeaking = false
-            }
+            if (isLast) finishSpeaking()
             return
         }
-        lastSpokenText = cleanedText
+        lastSpokenText = cleaned
         ttsSpeakTime = currentTime
 
         val tts = ttsEngine ?: run {
@@ -1392,34 +1505,22 @@ class LocalVoiceSession(
             isSpeaking = true
             // تم نقل notifySpeakingStarted إلى processLlmChunkForTts عشان يندى قبل أول جملة
             try {
-                tts.speak(cleanedText, isLast) {
-                    if (isLast) {
-                        conversationManager?.notifySpeakingEnded() // ← هيخليه يرجع LISTENING
-                        isSpeaking = false
-                    }
+                tts.speak(cleaned, isLast) {
+                    if (isLast) finishSpeaking()
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "TTS speak failed: ${e.message}")
-                isSpeaking = false
-                // حتى لو الـ TTS فشل، نبلغ الـ Conversation Manager إن الكلام انتهى
-                if (isLast) {
-                    conversationManager?.notifySpeakingEnded()
-                }
+                // حتى لو الـ TTS فشل، نكمل مسار انتهاء الكلام
+                if (isLast) finishSpeaking()
             }
         } else {
             try {
-                tts.queueSentence(cleanedText, isLast) {
-                    if (isLast) {
-                        conversationManager?.notifySpeakingEnded() // ← هيخليه يرجع LISTENING
-                        isSpeaking = false
-                    }
+                tts.queueSentence(cleaned, isLast) {
+                    if (isLast) finishSpeaking()
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "TTS queue failed: ${e.message}")
-                isSpeaking = false
-                if (isLast) {
-                    conversationManager?.notifySpeakingEnded()
-                }
+                if (isLast) finishSpeaking()
             }
         }
     }
