@@ -69,8 +69,10 @@ object ChatSummaryManager {
         syncScope.launch {
             syncMutex.withLock {
                 try {
+                    // 1. احفظ المحادثة والملخص محلياً FIRST
                     saveSession(messages, sessionId)
 
+                    // 2. استرجع الـ serverNodeId من الملخص اللي اتحفظ للتو
                     val summary = getSummary(sessionId)
                     var nodeId = summary?.serverNodeId.orEmpty()
 
@@ -87,7 +89,9 @@ object ChatSummaryManager {
                     } else {
                         ChatRepository.updateSession(endpoint, nodeId, messages)
                     }
-                } catch (_: Exception) {}
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error in saveSessionAndSync: ${e.message}")
+                }
             }
         }
     }
@@ -102,23 +106,31 @@ object ChatSummaryManager {
             val chatJson = buildChatJson(messages, sessionId)
             chatFile.writeText(chatJson.toString())
 
-            // 2. إنشاء الملخص
+            // 2. تحديث الملخص (أو إنشاؤه لو مش موجود)
+            val summaryFile = File(summariesDir, "$sessionId.json")
+            val existingSummary = if (summaryFile.exists()) {
+                JSONObject(summaryFile.readText())
+            } else null
+
             val summary = generateSummary(messages)
             val keyPoints = extractKeyPoints(messages)
             val title = generateTitle(messages)
             val tags = extractTags(messages)
 
-            // 3. حفظ الملخص
-            val summaryFile = File(summariesDir, "$sessionId.json")
-            val summaryObj = JSONObject().apply {
+            // 3. حفظ الملخص (نحافظ على serverNodeId لو موجود)
+            val summaryObj = existingSummary ?: JSONObject()
+            summaryObj.apply {
                 put("sessionId", sessionId)
                 put("title", title)
                 put("summary", summary)
                 put("keyPoints", JSONArray(keyPoints))
                 put("messageCount", messages.size)
-                put("createdAt", System.currentTimeMillis())
                 put("updatedAt", System.currentTimeMillis())
                 put("tags", JSONArray(tags))
+                // نحافظ على createdAt الأصلي لو موجود
+                if (!has("createdAt")) put("createdAt", System.currentTimeMillis())
+                // نحافظ على serverNodeId الأصلي لو موجود
+                if (!has("serverNodeId")) put("serverNodeId", "")
             }
             summaryFile.writeText(summaryObj.toString())
 
