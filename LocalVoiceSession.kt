@@ -23,6 +23,7 @@ class LocalVoiceSession(
 
     companion object {
         private const val TAG = "LocalVoiceSession"
+        private const val COMMA_FALLBACK_THRESHOLD = 60
     }
 
     private var currentState = State.IDLE
@@ -77,6 +78,15 @@ class LocalVoiceSession(
 
     // ── NEW: إغلاق الجلسة بعد نطق الوداع (Goodbye) ──
     private var closeSessionAfterSpeech = false
+
+    // ── NEW: يبطل أي رد قديم لسه شغال في الخلفية بعد الـ barge-in ──
+    @Volatile private var responseGeneration = 0
+
+    // ── NEW: النص اللي كنت بتتكلم فيه وقت آخر رد اتبعت ──
+    @Volatile private var currentUserText: String = ""
+
+    // ── NEW: لو اتقاطعت وإنت بتكمل فكرة، نحتفظ بالجزء اللي قبل المقاطعة ──
+//    @Volatile private var pendingInterruptedText: String? = null
 
     // ── مانع "قيامة الجلسة": بعد الإغلاق، أي إشارة متأخرة من الـ LLM/CM
     // (مثلاً LISTENING من صدى الصوت أو سترايم متأخر) متفتحش الجلسة تاني ──
@@ -146,10 +156,11 @@ class LocalVoiceSession(
                 val cm = ConversationManager(
                     context = context,
                     config = ConversationManager.ConversationConfig(
-                        pauseMediumMs = 1500,  // هنستنى 2 ثانية كاملة قبل ما نقرر إنك خلصت
-                        pauseLongMs = 1700,    // لو سكت 3 ثواني، أكيد خلصت (ننهي الكلام فوراً)
+                        pauseMediumMs = 1700,  // هنستنى 2 ثانية كاملة قبل ما نقرر إنك خلصت
+                        pauseLongMs = 1900,    // لو سكت 3 ثواني، أكيد خلصت (ننهي الكلام فوراً)
                         bargeInThresholdMs = 400, // مهلة المقاطعة لما هو بيتكلم
-                        echoCancellationEnabled = true
+                        echoCancellationEnabled = true,
+                        adaptiveEnabled = false
                     ),
                     onStateChange = { convState ->
                         // بعد إغلاق الجلسة نتجاهل أي تغيير حالة متأخر (LISTENING
@@ -166,22 +177,20 @@ class LocalVoiceSession(
                         }
                     },
                     onUserUtterance = { text ->
-                        // Add user message to conversation history
                         conversationMessages.add(ChatMessage(text = text, isUser = true))
-
                         onFinalTranscript(text)
                         startLlmStreaming(text)
                     },
                     onPartialTranscript = { text -> onPartialTranscript(text) },
                     onBargeIn = {
-                        // 1. أوقف الـ TTS فوراً
+                        // يبطل أي رد قديم لسه بيتولد في الخلفية عشان مايتكلمش فوقك بعدين
+                        responseGeneration++
+                        llmProvider.cancel()
+                        // نحتفظ بالجزء اللي كنت بتتكلم فيه، عشان ندمجه مع اللي هتكمله
+
                         ttsEngine?.stop()
                         isSpeaking = false
-                        // ملاحظة: الفلاج closeSessionAfterSpeech مش بيتلغى هنا —
-                        // لو المستخدم قاطع رد الوداع، الجلسة هتقفل برضه بعد ما
-                        // الرد الجديد يخلص (كلمة الوداع ثابتة لكل الجلسة)
 
-                        // 2. ابدأ الاستماع تاني في نفس الـ session
                         startLocalProcessing()
                     },
                     onError = { err -> onError(err) }
@@ -205,7 +214,7 @@ class LocalVoiceSession(
     fun onWakeWordDetected() {
         if (currentState != State.IDLE) return
         Log.d(TAG, "Wake word -> starting local STT + VAD")
-
+//        pendingInterruptedText = null
         // ← NEW: Generate new session ID when starting a new session
         currentSessionId = "session_${System.currentTimeMillis()}"
         currentServerNodeId = null
@@ -374,7 +383,9 @@ class LocalVoiceSession(
     }
 
     private fun startLlmStreaming(userText: String) {
-        if (isSessionClosed) return // ← جلسة مقفولة: متقبلش كلام جديد
+        if (isSessionClosed) return
+        currentUserText = userText
+        val myGeneration = ++responseGeneration
         currentState = State.LLM_THINKING
         visualizer.setState(VisualizerState.OrbState.THINKING)
         visualizer.setAudioLevel(0f)
@@ -412,13 +423,13 @@ class LocalVoiceSession(
         llmProvider.sendMessage(
             json = json,
             onChunk = { chunk ->
-                val cleaned = cleanLlmChunkForSpeech(chunk)
-                if (cleaned.isNotEmpty()) {
-                    fullResponseBuffer.append(cleaned)
-                    onLlmResponse(fullResponseBuffer.toString())
-
-                    // Streaming TTS: ابدأ تشمع الجمل وتكلم فوراً
-                    processLlmChunkForTts(cleaned)
+                if (myGeneration == responseGeneration) {
+                    val cleaned = cleanLlmChunkForSpeech(chunk)
+                    if (cleaned.isNotEmpty()) {
+                        fullResponseBuffer.append(cleaned)
+                        onLlmResponse(fullResponseBuffer.toString())
+                        processLlmChunkForTts(cleaned)
+                    }
                 }
             },
             onAction = { actions ->
@@ -463,6 +474,7 @@ class LocalVoiceSession(
                 }
             },
             onDone = {
+                if (myGeneration != responseGeneration) return@sendMessage  // رد قديم اتلغى بالـ barge-in
                 if (handledByToolCall) return@sendMessage
 
                 val fullResponse = fullResponseBuffer.toString().trim()
@@ -1471,7 +1483,14 @@ class LocalVoiceSession(
                 lastEnd = i
             }
         }
-        return lastEnd
+        if (lastEnd != -1) return lastEnd
+
+        if (text.length >= COMMA_FALLBACK_THRESHOLD) {
+            val commaIdx = text.lastIndexOf(',')
+            if (commaIdx != -1) return commaIdx
+        }
+
+        return -1
     }
 
     private fun speakText(text: String, isLast: Boolean) {

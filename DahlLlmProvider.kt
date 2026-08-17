@@ -9,6 +9,9 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.util.concurrent.TimeUnit
 import com.axon.mobile.core.memory.LearningMemoryManager
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 class DahlLlmProvider(private val context: Context) : LlmProvider {
 
@@ -210,7 +213,8 @@ class DahlLlmProvider(private val context: Context) : LlmProvider {
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var _isReady = false
     private var currentJob: Job? = null
-
+    @Volatile private var currentRequestId = 0
+    @Volatile private var lastCancelledRequestId = 0
     private data class HistoryMessage(
         val role: String,
         val text: String,
@@ -282,6 +286,7 @@ class DahlLlmProvider(private val context: Context) : LlmProvider {
     private suspend fun streamDahlRequest(
         messagesArray: JSONArray,
         key: String,
+        requestId: Int,
         onChunk: (String) -> Unit
     ): StreamResult {
         val bodyString = JSONObject().apply {
@@ -319,7 +324,7 @@ class DahlLlmProvider(private val context: Context) : LlmProvider {
             ?: return StreamResult(StringBuilder(), emptyList(), "Empty response body")
 
         val buffer = okio.Buffer()
-        while (!source.exhausted() && currentJob?.isActive == true) {
+        while (!source.exhausted() && requestId == currentRequestId) {
             source.read(buffer, 8192)
             val chunk = buffer.readUtf8()
             chunk.lines().forEach { line ->
@@ -400,7 +405,9 @@ class DahlLlmProvider(private val context: Context) : LlmProvider {
         onChunk:  (String) -> Unit,
         onDone:   () -> Unit,
         onError:  (String) -> Unit,
-        onAction: (List<JSONObject>) -> Unit
+        onAction: (List<JSONObject>) -> Unit,
+        onImage:  (android.graphics.Bitmap) -> Unit,
+        onReferences: (List<AiReference>) -> Unit
     ) {
         val key = apiKey
         if (key.isNullOrBlank()) {
@@ -419,8 +426,8 @@ class DahlLlmProvider(private val context: Context) : LlmProvider {
 
         if (imageB64 != null && currentModel !in VISION_CAPABLE_MODELS) {
             onError(
-                "الموديل الحالي ($currentModel) مش بيدعم الصور. " +
-                        "روح على Settings > Local Models > Dahl واختار موديل زي MiniMaxAI/MiniMax-M2.7."
+                "The current model ($currentModel) does not support images. " +
+                        "Go to Settings > Local Models > Dahl and choose a model like MiniMaxAI/MiniMax-M2.7."
             )
             return
         }
@@ -445,12 +452,23 @@ class DahlLlmProvider(private val context: Context) : LlmProvider {
         val learnedMemoryBlock = LearningMemoryManager.getBlock()
 
         messageHistory.add(HistoryMessage("user", userText, imageDataUrl))
+        val userMsgIndex = messageHistory.size - 1   // ← عشان نقدر نمسحها لو الطلب اتلغى
         trimHistory()
 
         currentJob?.cancel()
+        val myRequestId = ++currentRequestId
         currentJob = scope.launch {
             try {
-                val baseSystemPrompt = TOOL_MODE_SYSTEM_PROMPT + (SystemPromptManager.getContextBlock() ?: "") + learnedMemoryBlock
+                val currentDateTime = SimpleDateFormat(
+                    "yyyy-MM-dd HH:mm:ss",
+                    Locale.getDefault()
+                ).format(Date())
+
+                val baseSystemPrompt = TOOL_MODE_SYSTEM_PROMPT +
+                        (SystemPromptManager.getContextBlock() ?: "") +
+                        learnedMemoryBlock +
+                        "\n\nCurrent date and time: $currentDateTime"
+
                 val systemPrompt = if (contextAugmentation.isNotBlank()) {
                     baseSystemPrompt + contextAugmentation
                 } else {
@@ -469,7 +487,7 @@ class DahlLlmProvider(private val context: Context) : LlmProvider {
                 val allToolCalls = mutableListOf<ToolCallInfo>()
 
                 // ── Turn 1 ──
-                var currentResult = streamDahlRequest(messagesArray, key, onChunk)
+                var currentResult = streamDahlRequest(messagesArray, key, myRequestId, onChunk)
                 if (currentResult.error != null) {
                     withContext(Dispatchers.Main) { onError(currentResult.error) }
                     return@launch
@@ -529,7 +547,7 @@ class DahlLlmProvider(private val context: Context) : LlmProvider {
 
                     searchRounds++
                     Log.d(TAG, "Sending follow-up request (round $searchRounds)")
-                    currentResult = streamDahlRequest(messagesArray, key, onChunk)
+                    currentResult = streamDahlRequest(messagesArray, key, myRequestId, onChunk)
                     if (currentResult.error != null) {
                         withContext(Dispatchers.Main) { onError(currentResult.error) }
                         return@launch
@@ -570,6 +588,16 @@ class DahlLlmProvider(private val context: Context) : LlmProvider {
                 ).trim()
 
                 val assistantText = cleanText
+                if (myRequestId <= lastCancelledRequestId) {
+                    if (userMsgIndex in messageHistory.indices &&
+                        messageHistory[userMsgIndex].role == "user" &&
+                        messageHistory[userMsgIndex].text == userText
+                    ) {
+                        messageHistory.removeAt(userMsgIndex)
+                    }
+                    Log.d(TAG, "Request $myRequestId cancelled by barge-in — discarding partial history")
+                    return@launch
+                }
                 var hasContent = assistantText.isNotBlank()
 
                 if (assistantText.isNotEmpty()) {
@@ -600,6 +628,12 @@ class DahlLlmProvider(private val context: Context) : LlmProvider {
 
             } catch (e: CancellationException) {
                 Log.d(TAG, "Stream cancelled")
+                if (userMsgIndex in messageHistory.indices &&
+                    messageHistory[userMsgIndex].role == "user" &&
+                    messageHistory[userMsgIndex].text == userText
+                ) {
+                    messageHistory.removeAt(userMsgIndex)
+                }
                 withContext(Dispatchers.Main) { onDone() }
             } catch (e: Exception) {
                 Log.e(TAG, "Dahl stream error", e)
@@ -616,6 +650,12 @@ class DahlLlmProvider(private val context: Context) : LlmProvider {
         Log.d(TAG, "Dahl provider disconnected")
     }
 
+    override fun cancel() {
+        lastCancelledRequestId = currentRequestId
+        currentJob?.cancel()
+        currentJob = null
+        Log.d(TAG, "DahIL request cancelled (barge-in)")
+    }
     fun clearHistory() {
         messageHistory.clear()
         Log.d(TAG, "Conversation history cleared")

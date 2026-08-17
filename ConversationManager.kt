@@ -36,7 +36,11 @@ class ConversationManager(
         val maxUtteranceMs: Long = 30_000,
         val adaptiveEnabled: Boolean = true,
         val echoCancellationEnabled: Boolean = true,
-        val bargeInCooldownMs: Long = 500   // زودناها عشان نظام الـ AEC يلحق يشتغل
+        val bargeInCooldownMs: Long = 500,   // زودناها عشان نظام الـ AEC يلحق يشتغل
+        // ── NEW: تأكيد الـ barge-in (فلترة صدى TTS) ──
+        val bargeInPollIntervalMs: Long = 80,
+        val bargeInConfirmGraceMs: Long = 500,
+        val bargeInMinConfirmChars: Int = 2
     )
 
     private val _state = MutableStateFlow(ConversationState.IDLE)
@@ -66,6 +70,9 @@ class ConversationManager(
 
     private val isBargeInCooldown = AtomicBoolean(false)
     private val userSpokeDuringTts = AtomicBoolean(false)
+    private val bargeInCandidateActive = AtomicBoolean(false)
+    private val bargeInTranscriptConfirmed = AtomicBoolean(false)
+    @Volatile private var bargeInCandidateGeneration = 0
 
     private var endpointJob: Job? = null
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
@@ -96,6 +103,12 @@ class ConversationManager(
     fun onPartialTranscript(text: String) {
         if (text.isBlank()) return
         hasReceivedAnySpeech.set(true)
+
+        // ── تأكيد الـ barge-in: لو فيه فحص شغال دلوقتي ووصل partial حقيقي، نعتبره تأكيد
+        if (bargeInCandidateActive.get() && text.trim().length >= config.bargeInMinConfirmChars) {
+            bargeInTranscriptConfirmed.set(true)
+        }
+
         val now = System.currentTimeMillis()
         if (text == lastPartialText) {
             partialUnchangedMs = now - lastPartialTime
@@ -126,6 +139,9 @@ class ConversationManager(
         currentState = ConversationState.SPEAKING
         userSpokeDuringTts.set(false)
         isBargeInCooldown.set(true)
+        bargeInCandidateGeneration++          // يلغي أي فحص barge-in قديم متأخر
+        bargeInCandidateActive.set(false)
+        bargeInTranscriptConfirmed.set(false)
         scope.launch {
             delay(config.bargeInCooldownMs)
             isBargeInCooldown.set(false)
@@ -152,18 +168,55 @@ class ConversationManager(
 
         if (currentState == ConversationState.SPEAKING) {
             if (isBargeInCooldown.get()) return
+            if (bargeInCandidateActive.get()) return // فيه فحص شغال بالفعل
+
+            bargeInCandidateActive.set(true)
+            bargeInTranscriptConfirmed.set(false)
+            val myGen = ++bargeInCandidateGeneration
 
             scope.launch {
-                delay(config.bargeInThresholdMs)
+                // 1) استمرارية: الـ VAD لازم يفضل active طول فترة الـ threshold،
+                //    مش لحظة واحدة بس — صدى الـ TTS غالباً بيبقى متقطع
+                var elapsed = 0L
+                var continuous = true
+                while (elapsed < config.bargeInThresholdMs) {
+                    delay(config.bargeInPollIntervalMs)
+                    elapsed += config.bargeInPollIntervalMs
+                    if (myGen != bargeInCandidateGeneration) { bargeInCandidateActive.set(false); return@launch }
+                    if (vadEngine?.isCurrentlyActive != true) { continuous = false; break }
+                }
 
-                // التعديل هنا: نتأكد مباشرة من الـ VAD Engine إنه لسه بيحس بالكلام
-                val stillSpeech = vadEngine?.isCurrentlyActive == true
+                if (myGen != bargeInCandidateGeneration || currentState != ConversationState.SPEAKING) {
+                    bargeInCandidateActive.set(false)
+                    return@launch
+                }
+                if (!continuous) {
+                    Log.d(TAG, "Barge-in candidate rejected — VAD not continuous (likely echo)")
+                    bargeInCandidateActive.set(false)
+                    return@launch
+                }
 
-                if (stillSpeech && currentState == ConversationState.SPEAKING) {
-                    Log.d(TAG, "🛑 BARGE-IN detected — stopping TTS")
+                // 2) تأكيد بالـ transcript: نستنى partial نص حقيقي واصل من الـ STT
+                //    صدى الـ TTS نادراً ما بيولّد transcript متّسق زي كلام حقيقي
+                var waited = 0L
+                while (waited < config.bargeInConfirmGraceMs && !bargeInTranscriptConfirmed.get()) {
+                    delay(config.bargeInPollIntervalMs)
+                    waited += config.bargeInPollIntervalMs
+                    if (myGen != bargeInCandidateGeneration || currentState != ConversationState.SPEAKING) {
+                        bargeInCandidateActive.set(false)
+                        return@launch
+                    }
+                }
+
+                bargeInCandidateActive.set(false)
+
+                if (bargeInTranscriptConfirmed.get() && currentState == ConversationState.SPEAKING) {
+                    Log.d(TAG, "🛑 BARGE-IN confirmed (continuous VAD + real transcript) — stopping TTS")
                     userSpokeDuringTts.set(true)
                     currentState = ConversationState.BARGE_IN
                     mainHandler.post { onBargeIn() }
+                } else {
+                    Log.d(TAG, "Barge-in candidate rejected — no transcript confirmation (likely echo)")
                 }
             }
         }
@@ -200,6 +253,14 @@ class ConversationManager(
         endpointJob = scope.launch {
             while (isActive && currentState == ConversationState.LISTENING) {
                 val now = System.currentTimeMillis()
+
+                // ← FIX: طول ما الـ VAD لسه حاسس بكلام فعلي دلوقتي، حدّث lastSpeechTime
+                // باستمرار. من غير السطر ده، lastSpeechTime بتفضل واقفة على أول لحظة
+                // بدأت الكلام فيها، فـ silenceMs بتكبر غلط حتى وإنت لسه بتتكلم.
+                if (vadEngine?.isCurrentlyActive == true) {
+                    lastSpeechTime = now
+                }
+
                 val silenceMs = now - lastSpeechTime
                 val utteranceMs = now - utteranceStartTime
 
@@ -251,6 +312,9 @@ class ConversationManager(
         hasReceivedAnySpeech.set(false)
         userSpokeDuringTts.set(false)
         isBargeInCooldown.set(false)
+        bargeInCandidateActive.set(false)
+        bargeInTranscriptConfirmed.set(false)
+        bargeInCandidateGeneration++
     }
 
     private fun enableCommunicationMode(enable: Boolean) {

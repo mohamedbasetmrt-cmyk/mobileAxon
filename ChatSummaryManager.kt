@@ -1,10 +1,13 @@
 package com.example.app_abdelbaset
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.util.Log
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.*
 import kotlinx.coroutines.CoroutineScope
@@ -258,7 +261,7 @@ object ChatSummaryManager {
                 // تجميع النسخ المكررة لنفس الـ serverNodeId وأخذ الأحدث فقط
                 ?.groupBy { it.serverNodeId.ifBlank { it.sessionId } }
                 ?.map { (_, list) -> list.maxByOrNull { it.updatedAt } ?: list.first() }
-                ?.sortedByDescending { it.updatedAt } 
+                ?.sortedByDescending { it.updatedAt }
                 ?: emptyList()
         } catch (e: Exception) {
             Log.e(TAG, "Error getting all summaries: ${e.message}")
@@ -291,9 +294,21 @@ object ChatSummaryManager {
             val messagesArr = obj.getJSONArray("messages")
             List(messagesArr.length()) { i ->
                 val msg = messagesArr.getJSONObject(i)
+                val imagePath = msg.optString("imagePath", "")
                 ChatMessage(
                     text = msg.getString("text"),
-                    isUser = msg.getString("role") == "user"
+                    isUser = msg.getString("role") == "user",
+                    image = if (imagePath.isNotBlank()) loadChatImage(imagePath) else null,
+                    references = msg.optJSONArray("references")?.let { refsArr ->
+                        List(refsArr.length()) { j ->
+                            val ref = refsArr.getJSONObject(j)
+                            AiReference(
+                                title = ref.optString("title", ""),
+                                url = ref.optString("url", ""),
+                                description = ref.optString("description", "")
+                            )
+                        }
+                    } ?: emptyList()
                 )
             }
         } catch (e: Exception) {
@@ -370,18 +385,65 @@ object ChatSummaryManager {
 
     private fun buildChatJson(messages: List<ChatMessage>, sessionId: String): JSONObject {
         val msgsArr = JSONArray()
-        messages.forEach { m ->
-            msgsArr.put(JSONObject().apply {
+        messages.forEachIndexed { index, m ->
+            val msgObj = JSONObject().apply {
                 put("role", if (m.isUser) "user" else "assistant")
                 put("text", m.text)
                 put("timestamp", System.currentTimeMillis())
-            })
+
+                // حفظ الصورة كملف داخل التطبيق وحفظ المسار في الـ JSON
+                m.image?.let { bmp ->
+                    saveChatImage(sessionId, index, bmp)?.let { path ->
+                        put("imagePath", path)
+                    }
+                }
+
+                // حفظ المراجع
+                if (m.references.isNotEmpty()) {
+                    val refsArr = JSONArray()
+                    m.references.forEach { ref ->
+                        refsArr.put(JSONObject().apply {
+                            put("title", ref.title)
+                            put("url", ref.url)
+                            put("description", ref.description)
+                        })
+                    }
+                    put("references", refsArr)
+                }
+            }
+
+            msgsArr.put(msgObj)
         }
 
         return JSONObject().apply {
             put("sessionId", sessionId)
             put("messages", msgsArr)
             put("createdAt", System.currentTimeMillis())
+        }
+    }
+
+    private fun saveChatImage(sessionId: String, index: Int, bitmap: Bitmap): String? {
+        return try {
+            val dir = File(appContext.filesDir, "chat_images")
+            if (!dir.exists()) dir.mkdirs()
+            val file = File(dir, "${sessionId}_$index.jpg")
+            FileOutputStream(file).use { out ->
+                bitmap.compress(Bitmap.CompressFormat.JPEG, 90, out)
+            }
+            file.absolutePath
+        } catch (e: Exception) {
+            Log.e(TAG, "Error saving chat image: ${e.message}")
+            null
+        }
+    }
+
+    private fun loadChatImage(path: String): Bitmap? {
+        return try {
+            val file = File(path)
+            if (file.exists()) BitmapFactory.decodeFile(path) else null
+        } catch (e: Exception) {
+            Log.e(TAG, "Error loading chat image: ${e.message}")
+            null
         }
     }
 

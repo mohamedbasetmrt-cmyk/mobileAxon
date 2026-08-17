@@ -13,29 +13,24 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-class CohereLlmProvider(private val context: Context) : LlmProvider {
+class GroqLlmProvider(private val context: Context) : LlmProvider {
 
     companion object {
-        private const val TAG = "CohereProvider"
-        private const val PREF_COHERE_API_KEY = "cohere_api_key"
-        private const val PREF_COHERE_MODEL = "cohere_model"
-        private const val DEFAULT_MODEL = "command-a-plus-05-2026"
+        private const val TAG = "GroqProvider"
+        private const val PREF_GROQ_API_KEY = "groq_api_key"
+        private const val PREF_GROQ_MODEL = "groq_model"
+        private const val DEFAULT_MODEL = "qwen/qwen3.6-27b"
+        private const val API_BASE = "https://api.groq.com/openai/v1/chat/completions"
 
         val AVAILABLE_MODELS = listOf(
-            "command-a-plus-05-2026",
-            "command-a-vision-07-2025",
-            "command-r-plus-08-2024",
-            "command-r-08-2024",
-            "command-light"
+            "qwen/qwen3.6-27b",
+            "openai/gpt-oss-20b"
         )
 
-        private val VISION_CAPABLE_MODELS = setOf(
-            "command-a-plus-05-2026",
-            "command-a-vision-07-2025"
-        )
+        private val VISION_CAPABLE_MODELS = setOf<String>()
 
         // ═══════════════════════════════════════════════════════════════
-        //  TOOL 1: device_action  (تنفيذ أكشن على الموبايل)
+        //  TOOL 1: device_action
         // ═══════════════════════════════════════════════════════════════
         private val DEVICE_ACTION_TOOL = JSONObject().apply {
             put("type", "function")
@@ -64,7 +59,7 @@ class CohereLlmProvider(private val context: Context) : LlmProvider {
         }
 
         // ═══════════════════════════════════════════════════════════════
-        //  TOOL 2: knowledge_search  (بحث فى قاعدة المعرفة)
+        //  TOOL 2: knowledge_search
         // ═══════════════════════════════════════════════════════════════
         private val KNOWLEDGE_SEARCH_TOOL = JSONObject().apply {
             put("type", "function")
@@ -89,7 +84,6 @@ class CohereLlmProvider(private val context: Context) : LlmProvider {
             })
         }
 
-        // ⚠️ Must exactly match the `when(action)` cases in MobileActionExecutor.execute()
         private val KNOWN_ACTIONS = setOf(
             "call", "answer_call", "end_call", "set_alarm", "set_timer", "open_app", "open_url",
             "screen_lock", "screenshot", "volume_up", "volume_down", "volume_set",
@@ -146,6 +140,7 @@ class CohereLlmProvider(private val context: Context) : LlmProvider {
             append("## RESPONSE LENGTH\n")
             append("- Simple replies (confirmations, casual chat, quick answers) → AT MOST one short line.\n")
             append("- Longer replies are fine ONLY when truly needed (explanations, steps, details the user asked for).\n\n")
+
             append("## VOICE-FRIENDLY PHRASING\n")
             append("- Your text is converted to speech, so write in short, complete sentences with clear endings (period, question mark, exclamation mark).\n")
             append("- AVOID long comma-chained sentences (e.g. 'I did X, then Y, then Z'). Instead break them into separate short sentences: 'I did X. Then Y. Then Z.'\n")
@@ -192,7 +187,7 @@ class CohereLlmProvider(private val context: Context) : LlmProvider {
         }
     }
 
-    // ── Data classes for tool-call tracking ──
+    // ── Data classes ──
     private data class ToolCallInfo(
         val id: String,
         val name: String,
@@ -233,20 +228,20 @@ class CohereLlmProvider(private val context: Context) : LlmProvider {
     override val isReady: Boolean get() = _isReady
 
     val apiKey: String?
-        get() = prefs.getString(PREF_COHERE_API_KEY, null)?.takeIf { it.isNotBlank() }
+        get() = prefs.getString(PREF_GROQ_API_KEY, null)?.takeIf { it.isNotBlank() }
 
     val currentModel: String
-        get() = prefs.getString(PREF_COHERE_MODEL, DEFAULT_MODEL) ?: DEFAULT_MODEL
+        get() = prefs.getString(PREF_GROQ_MODEL, DEFAULT_MODEL) ?: DEFAULT_MODEL
 
     fun hasApiKey(): Boolean = !apiKey.isNullOrBlank()
 
     override fun connect(onConnected: () -> Unit) {
         _isReady = hasApiKey()
         if (_isReady) {
-            Log.d(TAG, "Cohere provider ready (model: $currentModel)")
+            Log.d(TAG, "Groq provider ready (model: $currentModel)")
             onConnected()
         } else {
-            Log.w(TAG, "Cohere API key not set")
+            Log.w(TAG, "Groq API key not set")
         }
     }
 
@@ -287,10 +282,9 @@ class CohereLlmProvider(private val context: Context) : LlmProvider {
     }
 
     // ═══════════════════════════════════════════════════════════════
-    //  HELPER: Stream a single Cohere chat request
-    //  Returns text + collected tool calls (or error)
+    //  HELPER: Stream a single Groq (OpenAI-compatible) chat request
     // ═══════════════════════════════════════════════════════════════
-    private suspend fun streamCohereRequest(
+    private suspend fun streamGroqRequest(
         messagesArray: JSONArray,
         key: String,
         requestId: Int,
@@ -300,14 +294,13 @@ class CohereLlmProvider(private val context: Context) : LlmProvider {
             put("model", currentModel)
             put("messages", messagesArray)
             put("tools", JSONArray().put(DEVICE_ACTION_TOOL).put(KNOWLEDGE_SEARCH_TOOL))
-            put("strict_tools", true)
             put("stream", true)
         }.toString()
 
         val requestBody = bodyString.toRequestBody("application/json".toMediaType())
 
         val request = okhttp3.Request.Builder()
-            .url("https://api.cohere.com/v2/chat")
+            .url(API_BASE)
             .addHeader("Authorization", "Bearer $key")
             .addHeader("Accept", "text/event-stream")
             .post(requestBody)
@@ -317,15 +310,16 @@ class CohereLlmProvider(private val context: Context) : LlmProvider {
 
         if (!response.isSuccessful) {
             val errBody = response.body?.string() ?: "unknown error"
-            return StreamResult(StringBuilder(), emptyList(), "Cohere HTTP ${response.code}: $errBody")
+            return StreamResult(StringBuilder(), emptyList(), "Groq HTTP ${response.code}: $errBody")
         }
 
         val fullResponse = StringBuilder()
-        val collectedToolCalls = mutableListOf<ToolCallInfo>()
-        val contentTypes = mutableMapOf<Int, String>()
-        var currentToolId = ""
-        var currentToolName = ""
-        val currentToolArgs = StringBuilder()
+
+        // OpenAI streaming: accumulate tool calls across chunks by index
+        val toolCallIds    = mutableMapOf<Int, String>()
+        val toolCallNames  = mutableMapOf<Int, String>()
+        val toolCallArgsBuilders = mutableMapOf<Int, StringBuilder>()
+        var finishReasonSeen = false
 
         val source = response.body?.source()
             ?: return StreamResult(StringBuilder(), emptyList(), "Empty response body")
@@ -340,59 +334,64 @@ class CohereLlmProvider(private val context: Context) : LlmProvider {
                     if (data == "[DONE]" || data.isEmpty()) return@forEach
                     try {
                         val obj = JSONObject(data)
-                        Log.d(TAG, "RAW: $data")
-                        val message = obj.optJSONObject("delta")?.optJSONObject("message")
 
-                        when (obj.optString("type")) {
-                            "content-start" -> {
-                                val idx = obj.optInt("index", 0)
-                                val type = message?.optJSONObject("content")?.optString("type", "text") ?: "text"
-                                contentTypes[idx] = type
-                            }
-                            "content-delta" -> {
-                                val idx = obj.optInt("index", 0)
-                                if (contentTypes[idx] != "thinking") {
-                                    val text = message?.optJSONObject("content")?.optString("text", "") ?: ""
-                                    if (text.isNotEmpty()) {
-                                        fullResponse.append(text)
-                                        withContext(Dispatchers.Main) { onChunk(text) }
-                                    }
+                        val choices = obj.optJSONArray("choices")
+                        if (choices == null || choices.length() == 0) return@forEach
+
+                        val choice = choices.optJSONObject(0) ?: return@forEach
+                        val delta  = choice.optJSONObject("delta") ?: return@forEach
+
+                        // ── Tool calls ──
+                        val toolCalls = delta.optJSONArray("tool_calls")
+                        if (toolCalls != null && toolCalls.length() > 0) {
+                            for (i in 0 until toolCalls.length()) {
+                                val tc = toolCalls.optJSONObject(i) ?: continue
+                                val idx = tc.optInt("index", 0)
+                                val fn  = tc.optJSONObject("function") ?: continue
+
+                                val id = tc.optString("id", "")
+                                if (id.isNotEmpty()) {
+                                    toolCallIds[idx] = id
                                 }
-                            }
-                            "tool-call-start" -> {
-                                val toolCall = firstToolCall(message)
-                                currentToolId = toolCall?.optString("id", "") ?: ""
-                                currentToolName = toolCall?.optJSONObject("function")?.optString("name", "") ?: ""
-                                currentToolArgs.clear()
-                                val initialArgs = toolCall?.optJSONObject("function")?.optString("arguments", "") ?: ""
-                                if (initialArgs.isNotEmpty()) currentToolArgs.append(initialArgs)
-                            }
-                            "tool-call-delta" -> {
-                                val argsChunk = firstToolCall(message)
-                                    ?.optJSONObject("function")?.optString("arguments", "") ?: ""
-                                currentToolArgs.append(argsChunk)
-                            }
-                            "tool-call-end" -> {
-                                if (currentToolName.isNotBlank()) {
-                                    val id = currentToolId.ifBlank { "tool_call_${collectedToolCalls.size}" }
-                                    collectedToolCalls.add(
-                                        ToolCallInfo(id, currentToolName, currentToolArgs.toString())
-                                    )
+
+                                val name = fn.optString("name", "")
+                                if (name.isNotEmpty()) {
+                                    toolCallNames[idx] = name
                                 }
-                                currentToolId = ""
-                                currentToolName = ""
-                                currentToolArgs.clear()
-                            }
-                            "message-end" -> {
-                                val finishReason = obj.optJSONObject("delta")?.optString("finish_reason", "")
-                                if (finishReason == "ERROR") {
-                                    val errMsg = obj.optJSONObject("delta")?.optString("error", "Unknown Cohere error")
-                                    Log.e(TAG, "Cohere message-end error: $errMsg")
+
+                                val args = fn.optString("arguments", "")
+                                if (args.isNotEmpty()) {
+                                    val builder = toolCallArgsBuilders.getOrPut(idx) { StringBuilder() }
+                                    builder.append(args)
                                 }
                             }
                         }
+
+                        // ── Text content ──
+                        val content = delta.optString("content", "")
+                        if (content.isNotEmpty()) {
+                            fullResponse.append(content)
+                            withContext(Dispatchers.Main) { onChunk(content) }
+                        }
+
+                        // ── Finish reason ──
+                        val finishReason = choice.optString("finish_reason", "")
+                        if (finishReason.isNotEmpty()) {
+                            finishReasonSeen = true
+                        }
+
                     } catch (_: Exception) {}
                 }
+            }
+        }
+
+        // ── Finalize tool calls ──
+        val collectedToolCalls = mutableListOf<ToolCallInfo>()
+        for ((idx, builder) in toolCallArgsBuilders) {
+            val name = toolCallNames[idx] ?: ""
+            val id   = toolCallIds[idx] ?: "call_$idx"
+            if (name.isNotBlank()) {
+                collectedToolCalls.add(ToolCallInfo(id, name, builder.toString()))
             }
         }
 
@@ -413,7 +412,7 @@ class CohereLlmProvider(private val context: Context) : LlmProvider {
     ) {
         val key = apiKey
         if (key.isNullOrBlank()) {
-            onError("Cohere API key not set. Go to Settings > Local Models > Cohere API Key")
+            onError("Groq API key not set. Go to Settings > Local Models > Groq API Key")
             return
         }
 
@@ -429,7 +428,7 @@ class CohereLlmProvider(private val context: Context) : LlmProvider {
         if (imageB64 != null && currentModel !in VISION_CAPABLE_MODELS) {
             onError(
                 "The current model ($currentModel) does not support images. " +
-                        "Go to Settings > Local Models > Cohere and choose a vision-capable model like command-a-vision-07-2025."
+                        "Groq models currently do not support sending images."
             )
             return
         }
@@ -461,7 +460,6 @@ class CohereLlmProvider(private val context: Context) : LlmProvider {
         val myRequestId = ++currentRequestId
         currentJob = scope.launch {
             try {
-                // Include the context augmentation in the system prompt
                 val currentDateTime = SimpleDateFormat(
                     "yyyy-MM-dd HH:mm:ss",
                     Locale.getDefault()
@@ -489,8 +487,8 @@ class CohereLlmProvider(private val context: Context) : LlmProvider {
                 val allTextBuilder = StringBuilder()
                 val allToolCalls = mutableListOf<ToolCallInfo>()
 
-                // ── Turn 1: Initial request ──
-                var currentResult = streamCohereRequest(messagesArray, key, myRequestId, onChunk)
+                // ── Turn 1 ──
+                var currentResult = streamGroqRequest(messagesArray, key, myRequestId, onChunk)
                 if (currentResult.error != null) {
                     withContext(Dispatchers.Main) { onError(currentResult.error) }
                     return@launch
@@ -500,9 +498,8 @@ class CohereLlmProvider(private val context: Context) : LlmProvider {
                 allToolCalls.addAll(currentResult.toolCalls)
 
                 var searchRounds = 0
-                val MAX_SEARCH_ROUNDS = 3  // أقصى عدد لمرات البحث المتكرر
+                val MAX_SEARCH_ROUNDS = 3
 
-                // ── Loop for multiple search rounds if the model isn't satisfied ──
                 while (searchRounds < MAX_SEARCH_ROUNDS) {
                     val knowledgeSearchCalls = currentResult.toolCalls.filter { it.name == "knowledge_search" }
                     if (knowledgeSearchCalls.isEmpty()) break
@@ -510,7 +507,11 @@ class CohereLlmProvider(private val context: Context) : LlmProvider {
                     val allCallsFromCurrentTurn = currentResult.toolCalls
                     messagesArray.put(JSONObject().apply {
                         put("role", "assistant")
-                        if (currentResult.text.isNotEmpty()) put("content", currentResult.text.toString())
+                        if (currentResult.text.isNotEmpty()) {
+                            put("content", currentResult.text.toString())
+                        } else {
+                            put("content", JSONObject.NULL)
+                        }
                         put("tool_calls", JSONArray().apply {
                             for (tc in allCallsFromCurrentTurn) {
                                 put(JSONObject().apply {
@@ -541,18 +542,13 @@ class CohereLlmProvider(private val context: Context) : LlmProvider {
                         messagesArray.put(JSONObject().apply {
                             put("role", "tool")
                             put("tool_call_id", tc.id)
-                            put("content", JSONObject().apply {
-                                put("type", "document")
-                                put("document", JSONObject().apply {
-                                    put("data", toolContent)
-                                })
-                            })
+                            put("content", toolContent)
                         })
                     }
 
                     searchRounds++
                     Log.d(TAG, "Sending follow-up request (round $searchRounds)")
-                    currentResult = streamCohereRequest(messagesArray, key, myRequestId, onChunk)
+                    currentResult = streamGroqRequest(messagesArray, key, myRequestId, onChunk)
                     if (currentResult.error != null) {
                         withContext(Dispatchers.Main) { onError(currentResult.error) }
                         return@launch
@@ -562,20 +558,7 @@ class CohereLlmProvider(private val context: Context) : LlmProvider {
                     allToolCalls.addAll(currentResult.toolCalls)
                 }
 
-                if (myRequestId <= lastCancelledRequestId) {
-                    if (userMsgIndex in messageHistory.indices &&
-                        messageHistory[userMsgIndex].role == "user" &&
-                        messageHistory[userMsgIndex].text == userText
-                    ) {
-                        messageHistory.removeAt(userMsgIndex)
-                    }
-                    Log.d(TAG, "Request $myRequestId cancelled by barge-in — discarding partial history")
-                    return@launch
-                }
-
-                var hasContent = allTextBuilder.toString().isNotBlank()
-
-                // ── Process ALL device_action calls (from all turns) ──
+                // ── Process ALL device_action calls ──
                 val collectedActions = mutableListOf<JSONObject>()
                 for (tc in allToolCalls.filter { it.name == "device_action" }) {
                     try {
@@ -598,7 +581,25 @@ class CohereLlmProvider(private val context: Context) : LlmProvider {
                     }
                 }
 
-                val assistantText = allTextBuilder.toString().trim()
+                // ── Build final text (strip  thinking tags) ──
+                val rawText = allTextBuilder.toString().trim()
+                val cleanText = rawText.replace(
+                    Regex(" thinking.*? response\\s*", RegexOption.DOT_MATCHES_ALL),
+                    ""
+                ).trim()
+
+                val assistantText = cleanText
+                if (myRequestId <= lastCancelledRequestId) {
+                    if (userMsgIndex in messageHistory.indices &&
+                        messageHistory[userMsgIndex].role == "user" &&
+                        messageHistory[userMsgIndex].text == userText
+                    ) {
+                        messageHistory.removeAt(userMsgIndex)
+                    }
+                    Log.d(TAG, "Request $myRequestId cancelled by barge-in — discarding partial history")
+                    return@launch
+                }
+                var hasContent = assistantText.isNotBlank()
 
                 if (assistantText.isNotEmpty()) {
                     messageHistory.add(HistoryMessage("assistant", assistantText))
@@ -621,20 +622,9 @@ class CohereLlmProvider(private val context: Context) : LlmProvider {
 
                 withContext(Dispatchers.Main) {
                     if (collectedActions.isNotEmpty()) onAction(collectedActions)
-                    if (hasContent || collectedActions.isNotEmpty()) {
-                        onDone()
-                        // ── NEW: Save the conversation session after completion ──
-//                        scope.launch(Dispatchers.IO) {
-//                            val sessionId = "cohere_${System.currentTimeMillis()}"
-//                            val allMessages = messageHistory.map { h ->
-//                                ChatMessage(text = h.text, isUser = h.role == "user")
-//                            }
-//                            ChatSummaryManager.saveSession(allMessages, sessionId)
-//                            Log.d(TAG, "Saved conversation session: $sessionId")
-//                        }
-                    }
+                    if (hasContent || collectedActions.isNotEmpty()) onDone()
                     else if (searchRounds > 0) onError("I searched the knowledge base but couldn't find a complete answer. Please try rephrasing.")
-                    else onError("No response from Cohere")
+                    else onError("No response from Groq")
                 }
 
             } catch (e: CancellationException) {
@@ -647,8 +637,8 @@ class CohereLlmProvider(private val context: Context) : LlmProvider {
                 }
                 withContext(Dispatchers.Main) { onDone() }
             } catch (e: Exception) {
-                Log.e(TAG, "Cohere stream error", e)
-                withContext(Dispatchers.Main) { onError("Cohere error: ${e.message}") }
+                Log.e(TAG, "Groq stream error", e)
+                withContext(Dispatchers.Main) { onError("Groq error: ${e.message}") }
             }
         }
     }
@@ -658,41 +648,32 @@ class CohereLlmProvider(private val context: Context) : LlmProvider {
         currentJob = null
         _isReady = false
         messageHistory.clear()
-        Log.d(TAG, "Cohere provider disconnected")
+        Log.d(TAG, "Groq provider disconnected")
     }
 
     override fun cancel() {
         lastCancelledRequestId = currentRequestId
         currentJob?.cancel()
         currentJob = null
-        Log.d(TAG, "Cohere request cancelled (barge-in)")
+        Log.d(TAG, "Groq request cancelled (barge-in)")
     }
-
     fun clearHistory() {
         messageHistory.clear()
         Log.d(TAG, "Conversation history cleared")
     }
 
     fun setApiKey(key: String) {
-        prefs.edit().putString(PREF_COHERE_API_KEY, key.trim()).apply()
+        prefs.edit().putString(PREF_GROQ_API_KEY, key.trim()).apply()
         _isReady = key.isNotBlank()
     }
 
     fun setModel(model: String) {
-        prefs.edit().putString(PREF_COHERE_MODEL, model).apply()
+        prefs.edit().putString(PREF_GROQ_MODEL, model).apply()
     }
 
     fun clearApiKey() {
-        prefs.edit().remove(PREF_COHERE_API_KEY).apply()
+        prefs.edit().remove(PREF_GROQ_API_KEY).apply()
         _isReady = false
-    }
-
-    private fun firstToolCall(message: JSONObject?): JSONObject? {
-        return when (val tc = message?.opt("tool_calls")) {
-            is JSONArray  -> tc.optJSONObject(0)
-            is JSONObject -> tc
-            else          -> null
-        }
     }
 
     private fun trimHistory() {

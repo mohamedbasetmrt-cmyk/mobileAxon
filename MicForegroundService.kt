@@ -17,7 +17,7 @@ import android.os.Looper
 enum class AxonMode { SERVER, LOCAL }
 
 // ── NEW: Local LLM Provider types ──────────────────────────────────
-enum class LocalLlmProviderType { GEMMA_4B, COHERE_API, DAHL_API }
+enum class LocalLlmProviderType { GEMMA_4B, COHERE_API, DAHL_API, MISTRAL_API, GROQ_API }
 
 class MicForegroundService : Service() {
 
@@ -192,6 +192,30 @@ class MicForegroundService : Service() {
                     }
                 }
             }
+            LocalLlmProviderType.MISTRAL_API -> {
+                updateNotification("Connecting to Mistral API...")
+                MistralLlmProvider(applicationContext).also { provider ->
+                    if (!provider.hasApiKey()) {
+                        updateNotification("Mistral API key not set - check Settings")
+                        showToast("Mistral API key not set")
+                    } else {
+                        provider.connect {}
+                        updateNotification("Mistral API ready (${provider.currentModel})")
+                    }
+                }
+            }
+            LocalLlmProviderType.GROQ_API -> {
+                updateNotification("Connecting to Groq API...")
+                GroqLlmProvider(applicationContext).also { provider ->
+                    if (!provider.hasApiKey()) {
+                        updateNotification("Groq API key not set - check Settings")
+                        showToast("Groq API key not set")
+                    } else {
+                        provider.connect {}
+                        updateNotification("Groq API ready (${provider.currentModel})")
+                    }
+                }
+            }
         }
 
         val session = LocalVoiceSession(
@@ -227,6 +251,14 @@ class MicForegroundService : Service() {
                 }
                 if (currentLocalProvider == LocalLlmProviderType.DAHL_API) {
                     updateNotification("Local mode ready (Dahl)")
+                    startWakeWordDetection()
+                }
+                if (currentLocalProvider == LocalLlmProviderType.MISTRAL_API) {
+                    updateNotification("Local mode ready (Mistral)")
+                    startWakeWordDetection()
+                }
+                if (currentLocalProvider == LocalLlmProviderType.GROQ_API) {
+                    updateNotification("Local mode ready (Groq)")
                     startWakeWordDetection()
                 }
                 // For Gemma, loadLlmModel is already called above

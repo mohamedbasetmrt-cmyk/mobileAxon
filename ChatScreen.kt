@@ -79,19 +79,24 @@ import androidx.lifecycle.LifecycleEventObserver
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.net.Uri
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import android.widget.Toast
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.core.content.ContextCompat
+import androidx.compose.material.icons.filled.Download
 
 data class ChatMessage(
     val text:     String,
     val isUser:   Boolean,
     val isTyping: Boolean = false,
-    val image:    android.graphics.Bitmap? = null
+    val image:    android.graphics.Bitmap? = null,
+    val references: List<AiReference> = emptyList()
 )
 
 // enum لمساعدة واجهة المايك
@@ -532,13 +537,23 @@ fun ChatScreen(
         mutableStateOf(prefs.getFloat("message_font_size", 13f))
     }
 
+    // ── Mistral abilities (web_search / image_generation / code_interpreter) ──
+    var activeAbilities   by remember { mutableStateOf<Set<MistralAbility>>(emptySet()) }
+    var showAbilityMenu   by remember { mutableStateOf(false) }
+    var pendingAiImage    by remember { mutableStateOf<Bitmap?>(null) }
+    var pendingAiRefs     by remember { mutableStateOf<List<AiReference>>(emptyList()) }
+
+//    val isMistralActive =
+//        llmMode == LlmMode.LOCAL && localLlmProvider == LocalLlmProviderType.MISTRAL_API
+
     // ═════════════════════════════════════════════════════════════════
     //  DEEPGRAM STT ENGINE SETUP
     // ═════════════════════════════════════════════════════════════════
     var deepgramApiKey by remember { mutableStateOf(prefs.getString("deepgram_api_key", "") ?: "") }
 
     // متغير جديد بيجمع الكلام اللي اتقال عشان ميمسحش القديم
-    var accumulatedText by remember { mutableStateOf("") }
+    var baseText by remember { mutableStateOf("") }
+    var sessionCommitted by remember { mutableStateOf("") }
 
     val scope = rememberCoroutineScope()
 
@@ -546,12 +561,13 @@ fun ChatScreen(
         DeepgramSttEngine(
             apiKey = deepgramApiKey,
             language = "en",
-            onPartial = { partialText ->
-                inputText = if (accumulatedText.isBlank()) partialText else "$accumulatedText $partialText"
+            onPartial = { liveText ->
+                val committed = if (sessionCommitted.isBlank()) baseText else "$baseText $sessionCommitted".trim()
+                inputText = if (committed.isBlank()) liveText else "$committed $liveText"
             },
-            onFinal = { finalText ->
-                accumulatedText = if (accumulatedText.isBlank()) finalText else "$accumulatedText $finalText"
-                inputText = accumulatedText
+            onFinal = { utteranceText ->
+                sessionCommitted = if (sessionCommitted.isBlank()) utteranceText else "$sessionCommitted $utteranceText"
+                inputText = if (baseText.isBlank()) sessionCommitted else "$baseText $sessionCommitted"
             },
             onError = { err ->
                 messages.add(ChatMessage("🎙️ $err", isUser = false))
@@ -573,10 +589,8 @@ fun ChatScreen(
         when (voiceState) {
             VoiceState.IDLE -> {
                 voiceState = VoiceState.RECORDING
-                // الدمج هنا: لو فيه كلام مكتوب قبل كده بنخزنه عشان نرجعه ونكمل عليه
-                accumulatedText = inputText.trim()
-                if (accumulatedText.isNotEmpty()) accumulatedText += " "
-                inputText = accumulatedText
+                baseText = inputText.trim()
+                sessionCommitted = ""
                 deepgramEngine.reset()
                 deepgramEngine.start()
             }
@@ -584,16 +598,13 @@ fun ChatScreen(
                 voiceState = VoiceState.PROCESSING
                 deepgramEngine.stop()
                 scope.launch {
-                    delay(1000) // وقت لاستقبال أي كلمات أخيرة من Deepgram
+                    delay(600)
                     if (voiceState == VoiceState.PROCESSING) {
-                        val text = deepgramEngine.getFinalText().trim()
-                        if (text.isNotBlank()) {
-                            // عشان نتجنب تكرار الجملة لو الـ onFinal سجلها بالفعل
-                            if (!accumulatedText.trim().endsWith(text)) {
-                                accumulatedText = if (accumulatedText.isBlank()) text else "${accumulatedText.trim()} $text"
-                            }
+                        // fallback: لو فيه نص لسه متسجلش (partial لم يتحول final)
+                        val fullText = deepgramEngine.getFinalText().trim()
+                        if (fullText.isNotBlank()) {
+                            inputText = if (baseText.isBlank()) fullText else "$baseText $fullText"
                         }
-                        inputText = accumulatedText.trim()
                         voiceState = VoiceState.IDLE
                     }
                 }
@@ -621,8 +632,14 @@ fun ChatScreen(
     var localLlmProvider by remember { mutableStateOf(
         LocalLlmProviderType.valueOf(prefs.getString("local_llm_provider", "GEMMA_4B") ?: "GEMMA_4B")
     ) }
+    val isMistralActive =
+        llmMode == LlmMode.LOCAL && localLlmProvider == LocalLlmProviderType.MISTRAL_API
     var dahlApiKey by remember { mutableStateOf(prefs.getString("dahl_api_key", "") ?: "") }
     var dahlModel by remember { mutableStateOf(prefs.getString("dahl_model", "MiniMaxAI/MiniMax-M2.7") ?: "MiniMaxAI/MiniMax-M2.7") }
+    var mistralApiKey by remember { mutableStateOf(prefs.getString("mistral_api_key", "") ?: "") }
+    var mistralModel by remember { mutableStateOf(prefs.getString("mistral_model", "mistral-medium-3-5") ?: "mistral-medium-3-5") }
+    var groqApiKey by remember { mutableStateOf(prefs.getString("groq_api_key", "") ?: "") }
+    var groqModel by remember { mutableStateOf(prefs.getString("groq_model", "qwen/qwen3.6-27b") ?: "qwen/qwen3.6-27b") }
 
     val localProvider = remember {
         LocalLiteRTLMProvider(context).also {
@@ -636,6 +653,14 @@ fun ChatScreen(
 
     val dahlProvider = remember {
         DahlLlmProvider(context)
+    }
+
+    val mistralProvider = remember {
+        MistralLlmProvider(context)
+    }
+
+    val groqProvider = remember {
+        GroqLlmProvider(context)
     }
 
     val serverProvider = remember {
@@ -653,6 +678,8 @@ fun ChatScreen(
                     LocalLlmProviderType.GEMMA_4B -> localProvider as LlmProvider
                     LocalLlmProviderType.COHERE_API -> cohereProvider as LlmProvider
                     LocalLlmProviderType.DAHL_API -> dahlProvider as LlmProvider
+                    LocalLlmProviderType.MISTRAL_API -> mistralProvider as LlmProvider
+                    LocalLlmProviderType.GROQ_API -> groqProvider as LlmProvider
                 }
             } else {
                 serverProvider as LlmProvider
@@ -719,6 +746,20 @@ fun ChatScreen(
                             dahlProvider.connect { isConnected = true }
                         } else {
                             messages.add(ChatMessage("❌ Dahl API key not set", isUser = false))
+                        }
+                    }
+                    LocalLlmProviderType.MISTRAL_API -> {
+                        if (mistralProvider.hasApiKey()) {
+                            mistralProvider.connect { isConnected = true }
+                        } else {
+                            messages.add(ChatMessage("❌ Mistral API key not set", isUser = false))
+                        }
+                    }
+                    LocalLlmProviderType.GROQ_API -> {
+                        if (groqProvider.hasApiKey()) {
+                            groqProvider.connect { isConnected = true }
+                        } else {
+                            messages.add(ChatMessage("❌ Groq API key not set", isUser = false))
                         }
                     }
                 }
@@ -996,6 +1037,12 @@ fun ChatScreen(
                 messages.add(ChatMessage("...", isUser = false, isTyping = true))
                 scope.launch { listState.animateScrollToItem(messages.size - 1) }
             },
+            onImage = { bmp ->
+                pendingAiImage = bmp
+            },
+            onReferences = { refs ->
+                pendingAiRefs = refs
+            },
             onAction = { actions ->
                 handledByToolCall = true
                 messages.removeAll { it.isTyping }
@@ -1017,6 +1064,11 @@ fun ChatScreen(
             },
             onDone = {
                 messages.removeAll { it.isTyping }
+                val aiImage = pendingAiImage
+                val aiRefs  = pendingAiRefs
+                pendingAiImage = null
+                pendingAiRefs  = emptyList()
+
                 if (!handledByToolCall) {
                     val lastMsg = messages.lastOrNull()
                     if (lastMsg != null && !lastMsg.isUser) {
@@ -1039,6 +1091,27 @@ fun ChatScreen(
                         }
                     }
                 }
+
+                // Attach AI-generated image / web references to the final AI reply
+                val finalMsg = messages.lastOrNull()
+                if (aiImage != null || aiRefs.isNotEmpty()) {
+                    if (finalMsg != null && !finalMsg.isUser) {
+                        messages[messages.size - 1] = finalMsg.copy(
+                            image      = aiImage ?: finalMsg.image,
+                            references = if (aiRefs.isNotEmpty()) aiRefs else finalMsg.references
+                        )
+                    } else {
+                        messages.add(
+                            ChatMessage(
+                                text       = "",
+                                isUser     = false,
+                                image      = aiImage,
+                                references = aiRefs
+                            )
+                        )
+                    }
+                }
+
                 isWaiting = false
                 saveCurrentSession()
                 ChatSessionState.save(messages, currentSessionId)
@@ -1047,11 +1120,13 @@ fun ChatScreen(
             onError = { err ->
                 messages.removeAll { it.isTyping }
                 messages.add(ChatMessage("❌ $err", isUser = false))
+                pendingAiImage = null
+                pendingAiRefs  = emptyList()
                 isWaiting = false
             }
         )
     }
-
+    var refreshHistoryTrigger by remember { mutableStateOf(0) }
     fun loadSession(session: ChatSession) {
         saveCurrentSession()
         messages.clear()
@@ -1063,7 +1138,7 @@ fun ChatScreen(
         scope.launch { if (messages.isNotEmpty()) listState.animateScrollToItem(messages.size - 1) }
     }
 
-    var refreshHistoryTrigger by remember { mutableStateOf(0) }
+
 
     fun startNewChat() {
         saveCurrentSession()
@@ -1072,6 +1147,8 @@ fun ChatScreen(
         ChatSessionState.clear()
         cohereProvider.clearHistory()
         dahlProvider.clearHistory()
+        mistralProvider.clearHistory()
+        groqProvider.clearHistory()
         showHistory = false
         // تحديث قائمة التاريخ بعد الحفظ
         refreshHistoryTrigger++
@@ -1102,6 +1179,8 @@ fun ChatScreen(
             localProvider.unloadModel()
             cohereProvider.clearHistory()
             dahlProvider.clearHistory()
+            mistralProvider.clearHistory()
+            groqProvider.clearHistory()
             deepgramEngine.release()
         }
     }
@@ -1283,11 +1362,96 @@ fun ChatScreen(
                     modifier          = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.Bottom
                 ) {
-                    HudIconButton(
-                        onClick = { cameraManager.launch() }
-                    ) {
-                        Icon(Icons.Default.CameraAlt, contentDescription = "Camera",
-                            tint = TextPrimary, modifier = Modifier.size(17.dp))
+                    if (isMistralActive) {
+                        Box {
+                            HudIconButton(
+                                background = if (activeAbilities.isNotEmpty()) AccentViolet.copy(0.18f) else CardBg,
+                                border     = if (activeAbilities.isNotEmpty()) AccentViolet.copy(0.6f) else CardBorder,
+                                onClick    = { showAbilityMenu = true }
+                            ) {
+                                Icon(Icons.Default.CameraAlt, contentDescription = "Camera",
+                                    tint = if (activeAbilities.isNotEmpty()) AccentViolet else TextPrimary,
+                                    modifier = Modifier.size(17.dp))
+                            }
+                            DropdownMenu(
+                                expanded         = showAbilityMenu,
+                                onDismissRequest = { showAbilityMenu = false },
+                                modifier         = Modifier
+                                    .background(BgSecondary)
+                                    .border(0.5.dp, CardBorder, RoundedCornerShape(6.dp))
+                            ) {
+                                Text(
+                                    "// MISTRAL ABILITIES",
+                                    fontSize      = 9.sp,
+                                    color         = AccentViolet,
+                                    letterSpacing = 1.sp,
+                                    fontFamily    = AppFontFamily,
+                                    fontWeight    = FontWeight.Bold,
+                                    modifier      = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)
+                                )
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(
+                                            "TAKE PHOTO",
+                                            fontSize      = 10.sp,
+                                            color         = TextPrimary,
+                                            letterSpacing = 1.sp,
+                                            fontFamily    = AppFontFamily
+                                        )
+                                    },
+                                    onClick = {
+                                        showAbilityMenu = false
+                                        cameraManager.launch()
+                                    }
+                                )
+                                MistralAbility.values().forEach { ab ->
+                                    val checked = ab in activeAbilities
+                                    DropdownMenuItem(
+                                        text = {
+                                            Text(
+                                                when (ab) {
+                                                    MistralAbility.WEB_SEARCH        -> "WEB SEARCH"
+                                                    MistralAbility.IMAGE_GENERATION   -> "IMAGE GENERATION"
+                                                    MistralAbility.CODE_INTERPRETER   -> "CODE INTERPRETER"
+                                                },
+                                                fontSize      = 10.sp,
+                                                color         = if (checked) AccentViolet else TextPrimary,
+                                                letterSpacing = 1.sp,
+                                                fontFamily    = AppFontFamily
+                                            )
+                                        },
+                                        trailingIcon = {
+                                            Text(
+                                                if (checked) "✓" else "○",
+                                                fontSize   = 11.sp,
+                                                color      = if (checked) AccentViolet else TextMuted,
+                                                fontFamily = AppFontFamily
+                                            )
+                                        },
+                                        onClick = {
+                                            activeAbilities =
+                                                if (checked) activeAbilities - ab else activeAbilities + ab
+                                            mistralProvider.setAbilities(activeAbilities)
+                                        }
+                                    )
+                                }
+                                Text(
+                                    "BEST WITH MISTRAL-SMALL / LARGE",
+                                    fontSize      = 7.sp,
+                                    color         = TextMuted,
+                                    letterSpacing = 0.5.sp,
+                                    fontFamily    = AppFontFamily,
+                                    modifier      = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)
+                                )
+                            }
+                        }
+                    } else {
+                        HudIconButton(
+                            onClick = { cameraManager.launch() }
+                        ) {
+                            Icon(Icons.Default.CameraAlt, contentDescription = "Camera",
+                                tint = TextPrimary, modifier = Modifier.size(17.dp))
+                        }
                     }
 
                     Spacer(Modifier.width(6.dp))
@@ -1394,6 +1558,7 @@ fun ChatScreen(
                 context   = context,
                 refreshTrigger = refreshHistoryTrigger,
                 onLoad    = { loadSession(it) },
+                onDownload = { downloadSession(context, scope, it) },   // ← عدّلت هنا
                 onDelete  = { id ->
                     scope.launch(kotlinx.coroutines.Dispatchers.IO) {
                         // ── Local delete first (immediate) ──
@@ -1449,6 +1614,10 @@ fun ChatScreen(
                             cohereModel = prefs.getString("cohere_model", "command-a-plus-05-2026") ?: "command-a-plus-05-2026",
                             dahlApiKey = prefs.getString("dahl_api_key", "") ?: "",
                             dahlModel = prefs.getString("dahl_model", "MiniMaxAI/MiniMax-M2.7") ?: "MiniMaxAI/MiniMax-M2.7",
+                            mistralApiKey = prefs.getString("mistral_api_key", "") ?: "",
+                            mistralModel = prefs.getString("mistral_model", "mistral-medium-3-5") ?: "mistral-medium-3-5",
+                            groqApiKey = prefs.getString("groq_api_key", "") ?: "",
+                            groqModel = prefs.getString("groq_model", "qwen/qwen3.6-27b") ?: "qwen/qwen3.6-27b",
                             deepgramApiKey = prefs.getString("deepgram_api_key", "") ?: "",
                             onDeepgramApiKeyChange = { key ->
                                 prefs.edit().putString("deepgram_api_key", key).apply()
@@ -1475,6 +1644,18 @@ fun ChatScreen(
                             },
                             onDahlModelChange = { model ->
                                 prefs.edit().putString("dahl_model", model).apply()
+                            },
+                            onMistralApiKeyChange = { key ->
+                                prefs.edit().putString("mistral_api_key", key).apply()
+                            },
+                            onMistralModelChange = { model ->
+                                prefs.edit().putString("mistral_model", model).apply()
+                            },
+                            onGroqApiKeyChange = { key ->
+                                prefs.edit().putString("groq_api_key", key).apply()
+                            },
+                            onGroqModelChange = { model ->
+                                prefs.edit().putString("groq_model", model).apply()
                             },
                             currentMode     = llmMode,
                             localModelState = localModelState,
@@ -1772,6 +1953,7 @@ private fun HudMessageBubble(
     val isUser = msg.isUser
     val context = LocalContext.current
     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+    var showRefs by remember { mutableStateOf(false) }
 
     Row(
         modifier              = Modifier.fillMaxWidth(),
@@ -1827,17 +2009,25 @@ private fun HudMessageBubble(
                 .padding(horizontal = 12.dp, vertical = 9.dp)
         ) {
             Column {
-                msg.image?.let { bmp ->
-                    Image(
-                        bitmap             = bmp.asImageBitmap(),
-                        contentDescription = "Sent image",
-                        modifier           = Modifier
-                            .fillMaxWidth()
-                            .heightIn(max = 180.dp)
-                            .clip(RoundedCornerShape(6.dp))
-                    )
-                    if (msg.text.isNotEmpty() && msg.text != "📷 Image sent")
-                        Spacer(Modifier.height(6.dp))
+                if (isUser) {
+                    msg.image?.let { bmp ->
+                        Image(
+                            bitmap             = bmp.asImageBitmap(),
+                            contentDescription = "Sent image",
+                            modifier           = Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = 180.dp)
+                                .clip(RoundedCornerShape(6.dp))
+                                .combinedClickable(
+                                    onClick = {},
+                                    onLongClick = {
+                                        saveBitmapToDownloads(context, bmp)
+                                    }
+                                )
+                        )
+                        if (msg.text.isNotEmpty() && msg.text != "📷 Image sent")
+                            Spacer(Modifier.height(6.dp))
+                    }
                 }
 
                 if (msg.isTyping) {
@@ -1872,7 +2062,59 @@ private fun HudMessageBubble(
                         )
                     }
                 }
+
+                if (!isUser) {
+                    msg.image?.let { bmp ->
+                        if (msg.text.isNotEmpty() && msg.text != "📷 Image sent")
+                            Spacer(Modifier.height(6.dp))
+                        Image(
+                            bitmap             = bmp.asImageBitmap(),
+                            contentDescription = "Generated image",
+                            modifier           = Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = 240.dp)
+                                .clip(RoundedCornerShape(6.dp))
+                                .combinedClickable(
+                                    onClick = {},
+                                    onLongClick = {
+                                        saveBitmapToDownloads(context, bmp)
+                                    }
+                                )
+                        )
+                    }
+
+                    if (msg.references.isNotEmpty()) {
+                        Spacer(Modifier.height(8.dp))
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier          = Modifier
+                                .clip(RoundedCornerShape(4.dp))
+                                .background(NeonCyan.copy(0.08f))
+                                .border(0.5.dp, NeonCyan.copy(0.3f), RoundedCornerShape(4.dp))
+                                .clickable { showRefs = true }
+                                .padding(horizontal = 8.dp, vertical = 5.dp)
+                        ) {
+                            Text("🔗", fontSize = 9.sp)
+                            Spacer(Modifier.width(4.dp))
+                            Text(
+                                "REFERENCES (${msg.references.size})",
+                                fontSize      = 8.sp,
+                                color         = NeonCyan,
+                                letterSpacing = 1.sp,
+                                fontFamily    = AppFontFamily,
+                                fontWeight    = FontWeight.Bold
+                            )
+                        }
+                    }
+                }
             }
+        }
+
+        if (showRefs) {
+            HudReferencesDialog(
+                refs      = msg.references,
+                onDismiss = { showRefs = false }
+            )
         }
 
         if (isUser) {
@@ -1891,10 +2133,216 @@ private fun HudMessageBubble(
 }
 
 @Composable
+private fun HudReferencesDialog(
+    refs: List<AiReference>,
+    onDismiss: () -> Unit
+) {
+    val context = LocalContext.current
+    Dialog(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(16.dp))
+                .background(CardBg)
+                .border(0.5.dp, CardBorder, RoundedCornerShape(16.dp))
+                .padding(16.dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "// REFERENCES",
+                    fontSize      = 11.sp,
+                    fontWeight    = FontWeight.Bold,
+                    color         = NeonCyan,
+                    letterSpacing = 2.sp,
+                    fontFamily    = AppFontFamily,
+                    modifier      = Modifier.weight(1f)
+                )
+                Box(
+                    modifier = Modifier
+                        .size(28.dp)
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(BgSecondary)
+                        .border(0.5.dp, CardBorder, RoundedCornerShape(4.dp))
+                        .clickable { onDismiss() },
+                    contentAlignment = Alignment.Center
+                ) { Text("✕", fontSize = 10.sp, color = TextMuted) }
+            }
+            Spacer(Modifier.height(10.dp))
+            Divider(color = CardBorder, thickness = 0.5.dp)
+            Spacer(Modifier.height(8.dp))
+
+            if (refs.isEmpty()) {
+                Text(
+                    "NO REFERENCES",
+                    fontSize      = 9.sp,
+                    color         = TextMuted,
+                    letterSpacing = 1.sp,
+                    fontFamily    = AppFontFamily,
+                    modifier      = Modifier.padding(8.dp)
+                )
+            } else {
+                LazyColumn(modifier = Modifier.heightIn(max = 320.dp)) {
+                    items(refs) { ref ->
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(6.dp))
+                                .clickable {
+                                    try {
+                                        context.startActivity(
+                                            Intent(Intent.ACTION_VIEW, Uri.parse(ref.url))
+                                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                        )
+                                    } catch (e: Exception) {
+                                        Toast.makeText(context, "Cannot open link", Toast.LENGTH_SHORT).show()
+                                    }
+                                }
+                                .padding(vertical = 8.dp, horizontal = 6.dp)
+                        ) {
+                            Text(
+                                ref.title.ifBlank { ref.url },
+                                fontSize      = 10.sp,
+                                color         = NeonCyan,
+                                fontWeight    = FontWeight.Medium,
+                                fontFamily    = AppFontFamily,
+                                maxLines      = 2,
+                                overflow      = TextOverflow.Ellipsis
+                            )
+                            if (ref.description.isNotBlank()) {
+                                Spacer(Modifier.height(2.dp))
+                                Text(
+                                    ref.description,
+                                    fontSize   = 8.sp,
+                                    color      = TextMuted,
+                                    fontFamily = AppFontFamily,
+                                    maxLines   = 3,
+                                    overflow   = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                        Divider(color = CardBorder, thickness = 0.5.dp)
+                    }
+                }
+            }
+        }
+    }
+}
+
+fun downloadSession(
+    context: android.content.Context,
+    scope: kotlinx.coroutines.CoroutineScope,
+    session: ChatSession
+) {
+    scope.launch(kotlinx.coroutines.Dispatchers.IO) {
+        try {
+            val content = ChatRepository.buildTxtContent(session)
+            val safeTitle = session.title
+                .ifBlank { "chat" }
+                .replace(Regex("[^a-zA-Z0-9_\\-\\u0600-\\u06FF ]"), "")
+                .take(30)
+                .trim()
+            val fileName = "AXON_${safeTitle}_${System.currentTimeMillis()}.txt"
+
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+                // ── Android 10+ : MediaStore API (مفيش حاجة إذن مطلوبة) ──
+                val resolver = context.contentResolver
+                val contentValues = android.content.ContentValues().apply {
+                    put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, fileName)
+                    put(android.provider.MediaStore.MediaColumns.MIME_TYPE, "text/plain")
+                    put(android.provider.MediaStore.MediaColumns.RELATIVE_PATH, android.os.Environment.DIRECTORY_DOWNLOADS)
+                }
+
+                val uri = resolver.insert(
+                    android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                    contentValues
+                )
+
+                if (uri != null) {
+                    resolver.openOutputStream(uri)?.use { out ->
+                        out.write(content.toByteArray(Charsets.UTF_8))
+                    }
+                    withContext(kotlinx.coroutines.Dispatchers.Main) {
+                        Toast.makeText(context, "✅ Saved to Downloads: $fileName", Toast.LENGTH_LONG).show()
+                    }
+                } else {
+                    throw Exception("Could not create file in Downloads")
+                }
+
+            } else {
+                // ── Android 9 وأقل: كتابة مباشرة في Downloads (يحتاج WRITE_EXTERNAL_STORAGE) ──
+                val downloadsDir = android.os.Environment.getExternalStoragePublicDirectory(
+                    android.os.Environment.DIRECTORY_DOWNLOADS
+                )
+                if (!downloadsDir.exists()) downloadsDir.mkdirs()
+
+                val file = java.io.File(downloadsDir, fileName)
+                file.writeText(content, Charsets.UTF_8)
+
+                withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    Toast.makeText(context, "✅ Saved to Downloads: $fileName", Toast.LENGTH_LONG).show()
+                }
+            }
+
+        } catch (e: Exception) {
+            withContext(kotlinx.coroutines.Dispatchers.Main) {
+                Toast.makeText(context, "❌ Failed to export chat: ${e.message}", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+}
+
+fun saveBitmapToDownloads(
+    context: android.content.Context,
+    bitmap: android.graphics.Bitmap
+) {
+    try {
+        val fileName = "AXON_${System.currentTimeMillis()}.jpg"
+
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+            // ── Android 10+ : MediaStore API (مفيش حاجة إذن مطلوبة) ──
+            val resolver = context.contentResolver
+            val contentValues = android.content.ContentValues().apply {
+                put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, fileName)
+                put(android.provider.MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
+                put(android.provider.MediaStore.MediaColumns.RELATIVE_PATH, android.os.Environment.DIRECTORY_DOWNLOADS)
+            }
+
+            val uri = resolver.insert(
+                android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                contentValues
+            )
+
+            if (uri != null) {
+                resolver.openOutputStream(uri)?.use { out ->
+                    bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 90, out)
+                }
+                Toast.makeText(context, "✅ Image saved to Downloads", Toast.LENGTH_SHORT).show()
+            } else {
+                throw Exception("Could not create file in Downloads")
+            }
+        } else {
+            // ── Android 9 وأقل: كتابة مباشرة في Downloads ──
+            val downloadsDir = android.os.Environment.getExternalStoragePublicDirectory(
+                android.os.Environment.DIRECTORY_DOWNLOADS
+            )
+            if (!downloadsDir.exists()) downloadsDir.mkdirs()
+            val file = java.io.File(downloadsDir, fileName)
+            file.outputStream().use { out ->
+                bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 90, out)
+            }
+            Toast.makeText(context, "✅ Image saved to Downloads", Toast.LENGTH_SHORT).show()
+        }
+    } catch (e: Exception) {
+        Toast.makeText(context, "❌ Failed to save image: ${e.message}", Toast.LENGTH_SHORT).show()
+    }
+}
+
+@Composable
 private fun HudHistorySheet(
     context:   android.content.Context,
     refreshTrigger: Int = 0,
     onLoad:    (ChatSession) -> Unit,
+    onDownload: (ChatSession) -> Unit,   // ← جديد
     onDelete:  (String) -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -1947,9 +2395,10 @@ private fun HudHistorySheet(
                         remote.forEach { r ->
                             val localId = linkMap[r.id]
                             if (localId != null) {
-                                // الشات ده ليه نسخة محلية — نحدّثها بالبيانات من السيرفر بدل ما نضيف duplicate
+                                // الشات ده ليه نسخة محلية — نحدّث العنوان بس ونحافظ على
+                                // الرسائل المحلية (فيها الصور والمراجع اللي مش على السيرفر)
                                 val idx = merged.indexOfFirst { it.id == localId }
-                                if (idx >= 0) merged[idx] = merged[idx].copy(title = r.title, messages = r.messages)
+                                if (idx >= 0) merged[idx] = merged[idx].copy(title = r.title)
                             } else if (r.id !in localIds) {
                                 // شات سيرفر ملهوش نسخة محلية — نضيفه
                                 merged.add(r)
@@ -1962,10 +2411,10 @@ private fun HudHistorySheet(
         }
     }
 
-    LaunchedEffect(refreshTrigger) { 
+    LaunchedEffect(refreshTrigger) {
         // تأخير بسيط عشان الـ saveCurrentSession تخلص قبل ما نعمل refresh
         kotlinx.coroutines.delay(100)
-        refresh() 
+        refresh()
     }
 
     Column(
@@ -2029,6 +2478,7 @@ private fun HudHistorySheet(
                     HudSessionItem(
                         session = session,
                         onClick = { onLoad(session) },
+                        onDownload = { onDownload(session) },   // ← جديد
                         onDelete = { onDelete(session.id); refresh() }
                     )
                     Divider(color = CardBorder, thickness = 0.5.dp)
@@ -2042,6 +2492,7 @@ private fun HudHistorySheet(
 private fun HudSessionItem(
     session:  ChatSession,
     onClick:  () -> Unit,
+    onDownload: () -> Unit,   // ← جديد
     onDelete: () -> Unit
 ) {
     Row(
@@ -2076,6 +2527,25 @@ private fun HudSessionItem(
                 fontSize      = 8.sp,
                 letterSpacing = 0.5.sp,
                 fontFamily    = AppFontFamily
+            )
+        }
+        Spacer(Modifier.width(8.dp))
+
+        // زرار Download الجديد
+        Box(
+            modifier = Modifier
+                .size(28.dp)
+                .clip(RoundedCornerShape(4.dp))
+                .background(NeonCyan.copy(0.08f))
+                .border(0.5.dp, NeonCyan.copy(0.3f), RoundedCornerShape(4.dp))
+                .clickable { onDownload() },
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                Icons.Default.Download, // لو مش موجود استخدم Icons.Default.Share بدلاً منه
+                contentDescription = "Download",
+                tint     = NeonCyan.copy(0.8f),
+                modifier = Modifier.size(13.dp)
             )
         }
         Spacer(Modifier.width(8.dp))
@@ -2165,11 +2635,19 @@ private fun HudSettingsSheet(
     cohereModel: String = "command-a-plus-05-2026",
     dahlApiKey: String = "",
     dahlModel: String = "MiniMaxAI/MiniMax-M2.7",
+    mistralApiKey: String = "",
+    mistralModel: String = "mistral-medium-3-5",
+    groqApiKey: String = "",
+    groqModel: String = "qwen/qwen3.6-27b",
     onLocalProviderChange: (LocalLlmProviderType) -> Unit = {},
     onCohereApiKeyChange: (String) -> Unit = {},
     onCohereModelChange: (String) -> Unit = {},
     onDahlApiKeyChange: (String) -> Unit = {},
     onDahlModelChange: (String) -> Unit = {},
+    onMistralApiKeyChange: (String) -> Unit = {},
+    onMistralModelChange: (String) -> Unit = {},
+    onGroqApiKeyChange: (String) -> Unit = {},
+    onGroqModelChange: (String) -> Unit = {},
     messageFontSize: Float = 13f,
     onMessageFontSizeChange: (Float) -> Unit = {},
     deepgramApiKey: String = "",
@@ -2412,11 +2890,15 @@ private fun HudSettingsSheet(
                             LocalLlmProviderType.GEMMA_4B -> NeonGreen
                             LocalLlmProviderType.COHERE_API -> AccentPink
                             LocalLlmProviderType.DAHL_API -> NeonCyan
+                            LocalLlmProviderType.MISTRAL_API -> AccentViolet
+                            LocalLlmProviderType.GROQ_API -> AccentOrange
                         }
                         val label = when (provider) {
-                            LocalLlmProviderType.GEMMA_4B -> "◈ GEMMA 4B"
-                            LocalLlmProviderType.COHERE_API -> "◉ COHERE"
-                            LocalLlmProviderType.DAHL_API -> "◉ DAHL"
+                            LocalLlmProviderType.GEMMA_4B -> "GEMMA 4B"
+                            LocalLlmProviderType.COHERE_API -> "COHERE"
+                            LocalLlmProviderType.DAHL_API -> "DAHL"
+                            LocalLlmProviderType.MISTRAL_API -> "MISTRAL"
+                            LocalLlmProviderType.GROQ_API -> "GROQ"
                         }
                         Box(
                             modifier = Modifier
@@ -2663,6 +3145,226 @@ private fun HudSettingsSheet(
                     }
                 }
 
+                if (currentLocalProvider == LocalLlmProviderType.MISTRAL_API) {
+                    Spacer(Modifier.height(12.dp))
+
+                    var draftKey by remember { mutableStateOf(mistralApiKey) }
+                    OutlinedTextField(
+                        value         = draftKey,
+                        onValueChange = { draftKey = it },
+                        label         = {
+                            Text(
+                                "MISTRAL API KEY",
+                                fontSize      = 9.sp,
+                                color         = TextMuted,
+                                fontFamily    = AppFontFamily
+                            )
+                        },
+                        singleLine = true,
+                        modifier   = Modifier.fillMaxWidth(),
+                        colors     = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor   = AccentViolet,
+                            unfocusedBorderColor = CardBorder,
+                            focusedLabelColor    = AccentViolet,
+                            cursorColor          = AccentViolet,
+                            focusedTextColor     = TextPrimary,
+                            unfocusedTextColor   = TextPrimary
+                        ),
+                        textStyle = TextStyle(
+                            fontFamily    = AppFontFamily,
+                            fontSize      = 11.sp
+                        )
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(4.dp))
+                            .background(AccentViolet.copy(0.1f))
+                            .border(0.5.dp, AccentViolet.copy(0.4f), RoundedCornerShape(4.dp))
+                            .clickable { onMistralApiKeyChange(draftKey) }
+                            .padding(vertical = 8.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            "SAVE KEY",
+                            fontSize      = 9.sp,
+                            color         = AccentViolet,
+                            letterSpacing = 1.sp,
+                            fontFamily    = AppFontFamily
+                        )
+                    }
+
+                    Spacer(Modifier.height(8.dp))
+
+                    var modelExpanded by remember { mutableStateOf(false) }
+                    Box {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(36.dp)
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(CardBg)
+                                .border(0.5.dp, AccentViolet.copy(0.4f), RoundedCornerShape(6.dp))
+                                .clickable { modelExpanded = true },
+                            contentAlignment = Alignment.CenterStart
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 12.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment     = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    "◈ $mistralModel",
+                                    fontSize      = 10.sp,
+                                    color         = AccentViolet,
+                                    letterSpacing = 1.sp,
+                                    fontFamily    = AppFontFamily
+                                )
+                                Text("▾", fontSize = 10.sp, color = AccentViolet)
+                            }
+                        }
+
+                        DropdownMenu(
+                            expanded         = modelExpanded,
+                            onDismissRequest = { modelExpanded = false },
+                            modifier         = Modifier
+                                .background(BgSecondary)
+                                .border(0.5.dp, CardBorder, RoundedCornerShape(6.dp))
+                        ) {
+                            MistralLlmProvider.AVAILABLE_MODELS.forEach { model ->
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(
+                                            "◈ $model",
+                                            fontSize      = 10.sp,
+                                            color         = if (model == mistralModel) AccentViolet else TextPrimary,
+                                            letterSpacing = 1.sp,
+                                            fontFamily    = AppFontFamily
+                                        )
+                                    },
+                                    onClick = {
+                                        modelExpanded = false
+                                        onMistralModelChange(model)
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
+
+                if (currentLocalProvider == LocalLlmProviderType.GROQ_API) {
+                    Spacer(Modifier.height(12.dp))
+
+                    var draftKey by remember { mutableStateOf(groqApiKey) }
+                    OutlinedTextField(
+                        value         = draftKey,
+                        onValueChange = { draftKey = it },
+                        label         = {
+                            Text(
+                                "GROQ API KEY",
+                                fontSize      = 9.sp,
+                                color         = TextMuted,
+                                fontFamily    = AppFontFamily
+                            )
+                        },
+                        singleLine = true,
+                        modifier   = Modifier.fillMaxWidth(),
+                        colors     = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor   = AccentOrange,
+                            unfocusedBorderColor = CardBorder,
+                            focusedLabelColor    = AccentOrange,
+                            cursorColor          = AccentOrange,
+                            focusedTextColor     = TextPrimary,
+                            unfocusedTextColor   = TextPrimary
+                        ),
+                        textStyle = TextStyle(
+                            fontFamily    = AppFontFamily,
+                            fontSize      = 11.sp
+                        )
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(4.dp))
+                            .background(AccentOrange.copy(0.1f))
+                            .border(0.5.dp, AccentOrange.copy(0.4f), RoundedCornerShape(4.dp))
+                            .clickable { onGroqApiKeyChange(draftKey) }
+                            .padding(vertical = 8.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            "SAVE KEY",
+                            fontSize      = 9.sp,
+                            color         = AccentOrange,
+                            letterSpacing = 1.sp,
+                            fontFamily    = AppFontFamily
+                        )
+                    }
+
+                    Spacer(Modifier.height(8.dp))
+
+                    var modelExpanded by remember { mutableStateOf(false) }
+                    Box {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(36.dp)
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(CardBg)
+                                .border(0.5.dp, AccentOrange.copy(0.4f), RoundedCornerShape(6.dp))
+                                .clickable { modelExpanded = true },
+                            contentAlignment = Alignment.CenterStart
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 12.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment     = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    "◈ $groqModel",
+                                    fontSize      = 10.sp,
+                                    color         = AccentOrange,
+                                    letterSpacing = 1.sp,
+                                    fontFamily    = AppFontFamily
+                                )
+                                Text("▾", fontSize = 10.sp, color = AccentOrange)
+                            }
+                        }
+
+                        DropdownMenu(
+                            expanded         = modelExpanded,
+                            onDismissRequest = { modelExpanded = false },
+                            modifier         = Modifier
+                                .background(BgSecondary)
+                                .border(0.5.dp, CardBorder, RoundedCornerShape(6.dp))
+                        ) {
+                            GroqLlmProvider.AVAILABLE_MODELS.forEach { model ->
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(
+                                            "◈ $model",
+                                            fontSize      = 10.sp,
+                                            color         = if (model == groqModel) AccentOrange else TextPrimary,
+                                            letterSpacing = 1.sp,
+                                            fontFamily    = AppFontFamily
+                                        )
+                                    },
+                                    onClick = {
+                                        modelExpanded = false
+                                        onGroqModelChange(model)
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
+
                 if (currentLocalProvider == LocalLlmProviderType.GEMMA_4B && localModelState == LocalModelState.LOADED) {
                     Spacer(Modifier.height(4.dp))
                     Text(
@@ -2752,7 +3454,7 @@ private fun HudSettingsSheet(
         ExpandableSection(
             title = "◈ LEARNED MEMORY  //  ${learnedEntries.size}",
             accent = NeonGreen,
-            initiallyExpanded = true
+            initiallyExpanded = false
         ) {
             Spacer(Modifier.height(8.dp))
 

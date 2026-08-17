@@ -85,7 +85,9 @@ class ServerLlmProvider(
         onChunk: (String) -> Unit,
         onDone:  () -> Unit,
         onError: (String) -> Unit,
-        onAction: (List<JSONObject>) -> Unit
+        onAction: (List<JSONObject>) -> Unit,
+        onImage:  (android.graphics.Bitmap) -> Unit,
+        onReferences: (List<AiReference>) -> Unit
     ) {
         pendingChunk = onChunk
         pendingDone  = onDone

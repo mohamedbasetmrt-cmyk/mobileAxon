@@ -112,6 +112,12 @@ class MainActivity : ComponentActivity() {
     private var dahlApiKey by mutableStateOf("")
     private var dahlModel by mutableStateOf("MiniMaxAI/MiniMax-M2.7")
     private var dahlProvider: DahlLlmProvider? = null
+    private var mistralApiKey by mutableStateOf("")
+    private var mistralModel by mutableStateOf("mistral-medium-3-5")
+    private var mistralProvider: MistralLlmProvider? = null
+    private var groqApiKey by mutableStateOf("")
+    private var groqModel by mutableStateOf("qwen/qwen3.6-27b")
+    private var groqProvider: GroqLlmProvider? = null
     private var currentSttMode by mutableStateOf(SttMode.LOCAL)
     private var deepgramApiKey by mutableStateOf("")
 
@@ -251,6 +257,12 @@ class MainActivity : ComponentActivity() {
 
         dahlApiKey = prefs.getString("dahl_api_key", "") ?: ""
         dahlModel = prefs.getString("dahl_model", "MiniMaxAI/MiniMax-M2.7") ?: "MiniMaxAI/MiniMax-M2.7"
+
+        mistralApiKey = prefs.getString("mistral_api_key", "") ?: ""
+        mistralModel = prefs.getString("mistral_model", "mistral-medium-3-5") ?: "mistral-medium-3-5"
+
+        groqApiKey = prefs.getString("groq_api_key", "") ?: ""
+        groqModel = prefs.getString("groq_model", "qwen/qwen3.6-27b") ?: "qwen/qwen3.6-27b"
 
         currentSttMode = try {
             SttMode.valueOf(prefs.getString(PREF_STT_MODE, "LOCAL") ?: "LOCAL")
@@ -421,11 +433,19 @@ class MainActivity : ComponentActivity() {
                             cohereModel = cohereModel,
                             dahlApiKey = dahlApiKey,
                             dahlModel = dahlModel,
+                            mistralApiKey = mistralApiKey,
+                            mistralModel = mistralModel,
+                            groqApiKey = groqApiKey,
+                            groqModel = groqModel,
                             onLocalProviderChange = { onLocalProviderChange(it) },
                             onCohereApiKeyChange = { onCohereApiKeyChange(it) },
                             onCohereModelChange = { onCohereModelChange(it) },
                             onDahlApiKeyChange = { onDahlApiKeyChange(it) },
                             onDahlModelChange = { onDahlModelChange(it) },
+                            onMistralApiKeyChange = { onMistralApiKeyChange(it) },
+                            onMistralModelChange = { onMistralModelChange(it) },
+                            onGroqApiKeyChange = { onGroqApiKeyChange(it) },
+                            onGroqModelChange = { onGroqModelChange(it) },
                             onInitLocalModels = { checkLocalModels() },
                             onSelectedEndpointChange = { ep ->
                                 localSelected = ep
@@ -713,6 +733,32 @@ class MainActivity : ComponentActivity() {
         dahlModel = model
         prefs.edit().putString("dahl_model", model).apply()
         dahlProvider?.setModel(model)
+    }
+
+    private fun onMistralApiKeyChange(key: String) {
+        mistralApiKey = key
+        prefs.edit().putString("mistral_api_key", key).apply()
+        mistralProvider?.setApiKey(key)
+        Toast.makeText(this, "✅ Mistral API key saved", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun onMistralModelChange(model: String) {
+        mistralModel = model
+        prefs.edit().putString("mistral_model", model).apply()
+        mistralProvider?.setModel(model)
+    }
+
+    private fun onGroqApiKeyChange(key: String) {
+        groqApiKey = key
+        prefs.edit().putString("groq_api_key", key).apply()
+        groqProvider?.setApiKey(key)
+        Toast.makeText(this, "✅ Groq API key saved", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun onGroqModelChange(model: String) {
+        groqModel = model
+        prefs.edit().putString("groq_model", model).apply()
+        groqProvider?.setModel(model)
     }
 
     private fun onSttModeChange(mode: SttMode) {
@@ -1288,13 +1334,13 @@ fun MainScreen(
                         label    = "AVG RESP",
                         value    = ServiceStatsTracker.avgResponseString()
                     )
-                    HudStatCard(
-                        modifier  = Modifier.weight(1f),
-                        label     = "UPLINK",
-                        value     = "",
-                        dot       = ServiceStatsTracker.isOnline,
-                        dotColor  = if (ServiceStatsTracker.isOnline) NeonGreen else TextMuted
-                    )
+//                    HudStatCard(
+//                        modifier  = Modifier.weight(1f),
+//                        label     = "UPLINK",
+//                        value     = "",
+//                        dot       = ServiceStatsTracker.isOnline,
+//                        dotColor  = if (ServiceStatsTracker.isOnline) NeonGreen else TextMuted
+//                    )
                 }
                 Spacer(Modifier.height(4.dp))
             }
@@ -1508,11 +1554,19 @@ fun SettingsScreen(
     cohereModel: String = "command-a-plus-05-2026",
     dahlApiKey: String = "",
     dahlModel: String = "MiniMaxAI/MiniMax-M2.7",
+    mistralApiKey: String = "",
+    mistralModel: String = "mistral-medium-3-5",
+    groqApiKey: String = "",
+    groqModel: String = "qwen/qwen3.6-27b",
     onLocalProviderChange: (LocalLlmProviderType) -> Unit = {},
     onCohereApiKeyChange: (String) -> Unit = {},
     onCohereModelChange: (String) -> Unit = {},
     onDahlApiKeyChange: (String) -> Unit = {},
     onDahlModelChange: (String) -> Unit = {},
+    onMistralApiKeyChange: (String) -> Unit = {},
+    onMistralModelChange: (String) -> Unit = {},
+    onGroqApiKeyChange: (String) -> Unit = {},
+    onGroqModelChange: (String) -> Unit = {},
     currentSttMode: SttMode = SttMode.LOCAL,
     deepgramApiKey: String = "",
     onSttModeChange: (SttMode) -> Unit = {},
@@ -1728,9 +1782,11 @@ fun SettingsScreen(
 
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     val providerList = listOf(
-                        LocalLlmProviderType.GEMMA_4B to "◈ GEMMA 4B",
-                        LocalLlmProviderType.COHERE_API to "◉ COHERE API",
-                        LocalLlmProviderType.DAHL_API to "◉ DAHL API"
+                        LocalLlmProviderType.GEMMA_4B to "GEMMA 4B",
+                        LocalLlmProviderType.COHERE_API to "COHERE",
+                        LocalLlmProviderType.DAHL_API to "DAHL",
+                        LocalLlmProviderType.MISTRAL_API to "MISTRAL",
+                        LocalLlmProviderType.GROQ_API to "GROQ"
                     )
                     providerList.forEach { (provider, label) ->
                         val isSelected = currentLocalProvider == provider
@@ -1738,6 +1794,8 @@ fun SettingsScreen(
                             LocalLlmProviderType.GEMMA_4B -> NeonGreen
                             LocalLlmProviderType.COHERE_API -> AccentPink
                             LocalLlmProviderType.DAHL_API -> NeonCyan
+                            LocalLlmProviderType.MISTRAL_API -> AccentViolet
+                            LocalLlmProviderType.GROQ_API -> AccentOrange
                         }
                         Box(
                             modifier = Modifier
@@ -2070,6 +2128,310 @@ fun SettingsScreen(
                     )
                 }
 
+                // Mistral config UI
+                if (currentLocalProvider == LocalLlmProviderType.MISTRAL_API) {
+                    Spacer(Modifier.height(16.dp))
+                    Divider(color = CardBorder, thickness = 0.5.dp)
+                    Spacer(Modifier.height(16.dp))
+
+                    Text(
+                        "MISTRAL API CONFIGURATION",
+                        fontSize      = 8.sp,
+                        color         = AccentViolet.copy(0.8f),
+                        letterSpacing = 1.5.sp,
+                        fontFamily    = AppFontFamily
+                    )
+                    Spacer(Modifier.height(12.dp))
+
+                    var draftApiKey by remember { mutableStateOf(mistralApiKey) }
+                    OutlinedTextField(
+                        value         = draftApiKey,
+                        onValueChange = { draftApiKey = it },
+                        label         = {
+                            Text(
+                                "API KEY",
+                                fontSize      = 9.sp,
+                                color         = TextMuted,
+                                letterSpacing = 1.sp,
+                                fontFamily    = AppFontFamily
+                            )
+                        },
+                        singleLine = true,
+                        modifier   = Modifier.fillMaxWidth(),
+                        colors     = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor   = AccentViolet,
+                            unfocusedBorderColor = CardBorder,
+                            focusedLabelColor    = AccentViolet,
+                            cursorColor          = AccentViolet,
+                            focusedTextColor     = TextPrimary,
+                            unfocusedTextColor   = TextPrimary
+                        ),
+                        textStyle = androidx.compose.ui.text.TextStyle(
+                            fontFamily    = AppFontFamily,
+                            fontSize      = 12.sp,
+                            letterSpacing = 0.5.sp
+                        )
+                    )
+                    Spacer(Modifier.height(8.dp))
+
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(AccentViolet.copy(0.1f))
+                            .border(0.5.dp, AccentViolet.copy(0.5f), RoundedCornerShape(6.dp))
+                            .clickable { onMistralApiKeyChange(draftApiKey) }
+                            .padding(vertical = 12.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            "SAVE API KEY",
+                            fontSize      = 10.sp,
+                            color         = AccentViolet,
+                            fontWeight    = FontWeight.Bold,
+                            letterSpacing = 2.sp,
+                            fontFamily    = AppFontFamily
+                        )
+                    }
+
+                    Spacer(Modifier.height(12.dp))
+
+                    Text(
+                        "MODEL",
+                        fontSize      = 8.sp,
+                        color         = TextMuted,
+                        letterSpacing = 1.5.sp,
+                        fontFamily    = AppFontFamily
+                    )
+                    Spacer(Modifier.height(6.dp))
+
+                    var modelExpanded by remember { mutableStateOf(false) }
+                    Box {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(36.dp)
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(CardBg)
+                                .border(0.5.dp, AccentViolet.copy(0.4f), RoundedCornerShape(6.dp))
+                                .clickable { modelExpanded = true },
+                            contentAlignment = Alignment.CenterStart
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 12.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment     = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    "◈ $mistralModel",
+                                    fontSize      = 10.sp,
+                                    color         = AccentViolet,
+                                    letterSpacing = 1.sp,
+                                    fontFamily    = AppFontFamily
+                                )
+                                Text(
+                                    "▾",
+                                    fontSize = 10.sp,
+                                    color    = AccentViolet
+                                )
+                            }
+                        }
+
+                        DropdownMenu(
+                            expanded         = modelExpanded,
+                            onDismissRequest = { modelExpanded = false },
+                            modifier         = Modifier
+                                .background(BgSecondary)
+                                .border(0.5.dp, CardBorder, RoundedCornerShape(6.dp))
+                        ) {
+                            MistralLlmProvider.AVAILABLE_MODELS.forEach { model ->
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(
+                                            "◈ $model",
+                                            fontSize      = 10.sp,
+                                            color         = if (model == mistralModel) AccentViolet else TextPrimary,
+                                            letterSpacing = 1.sp,
+                                            fontFamily    = AppFontFamily
+                                        )
+                                    },
+                                    onClick = {
+                                        modelExpanded = false
+                                        onMistralModelChange(model)
+                                    }
+                                )
+                            }
+                        }
+                    }
+
+                    Spacer(Modifier.height(8.dp))
+
+                    val mistralProviderCheck = remember { MistralLlmProvider(context) }
+                    val mistralKeyStatus = if (mistralProviderCheck.hasApiKey()) "✓ KEY CONFIGURED" else "✗ KEY MISSING"
+                    val mistralKeyColor = if (mistralProviderCheck.hasApiKey()) NeonGreen else AccentViolet
+                    Text(
+                        mistralKeyStatus,
+                        fontSize      = 8.sp,
+                        color         = mistralKeyColor.copy(0.7f),
+                        letterSpacing = 1.sp,
+                        fontFamily    = AppFontFamily
+                    )
+                }
+
+                // Groq config UI
+                if (currentLocalProvider == LocalLlmProviderType.GROQ_API) {
+                    Spacer(Modifier.height(16.dp))
+                    Divider(color = CardBorder, thickness = 0.5.dp)
+                    Spacer(Modifier.height(16.dp))
+
+                    Text(
+                        "GROQ API CONFIGURATION",
+                        fontSize      = 8.sp,
+                        color         = AccentOrange.copy(0.8f),
+                        letterSpacing = 1.5.sp,
+                        fontFamily    = AppFontFamily
+                    )
+                    Spacer(Modifier.height(12.dp))
+
+                    var draftApiKey by remember { mutableStateOf(groqApiKey) }
+                    OutlinedTextField(
+                        value         = draftApiKey,
+                        onValueChange = { draftApiKey = it },
+                        label         = {
+                            Text(
+                                "API KEY",
+                                fontSize      = 9.sp,
+                                color         = TextMuted,
+                                letterSpacing = 1.sp,
+                                fontFamily    = AppFontFamily
+                            )
+                        },
+                        singleLine = true,
+                        modifier   = Modifier.fillMaxWidth(),
+                        colors     = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor   = AccentOrange,
+                            unfocusedBorderColor = CardBorder,
+                            focusedLabelColor    = AccentOrange,
+                            cursorColor          = AccentOrange,
+                            focusedTextColor     = TextPrimary,
+                            unfocusedTextColor   = TextPrimary
+                        ),
+                        textStyle = androidx.compose.ui.text.TextStyle(
+                            fontFamily    = AppFontFamily,
+                            fontSize      = 12.sp,
+                            letterSpacing = 0.5.sp
+                        )
+                    )
+                    Spacer(Modifier.height(8.dp))
+
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(AccentOrange.copy(0.1f))
+                            .border(0.5.dp, AccentOrange.copy(0.5f), RoundedCornerShape(6.dp))
+                            .clickable { onGroqApiKeyChange(draftApiKey) }
+                            .padding(vertical = 12.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            "SAVE API KEY",
+                            fontSize      = 10.sp,
+                            color         = AccentOrange,
+                            fontWeight    = FontWeight.Bold,
+                            letterSpacing = 2.sp,
+                            fontFamily    = AppFontFamily
+                        )
+                    }
+
+                    Spacer(Modifier.height(12.dp))
+
+                    Text(
+                        "MODEL",
+                        fontSize      = 8.sp,
+                        color         = TextMuted,
+                        letterSpacing = 1.5.sp,
+                        fontFamily    = AppFontFamily
+                    )
+                    Spacer(Modifier.height(6.dp))
+
+                    var modelExpanded by remember { mutableStateOf(false) }
+                    Box {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(36.dp)
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(CardBg)
+                                .border(0.5.dp, AccentOrange.copy(0.4f), RoundedCornerShape(6.dp))
+                                .clickable { modelExpanded = true },
+                            contentAlignment = Alignment.CenterStart
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 12.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment     = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    "◈ $groqModel",
+                                    fontSize      = 10.sp,
+                                    color         = AccentOrange,
+                                    letterSpacing = 1.sp,
+                                    fontFamily    = AppFontFamily
+                                )
+                                Text(
+                                    "▾",
+                                    fontSize = 10.sp,
+                                    color    = AccentOrange
+                                )
+                            }
+                        }
+
+                        DropdownMenu(
+                            expanded         = modelExpanded,
+                            onDismissRequest = { modelExpanded = false },
+                            modifier         = Modifier
+                                .background(BgSecondary)
+                                .border(0.5.dp, CardBorder, RoundedCornerShape(6.dp))
+                        ) {
+                            GroqLlmProvider.AVAILABLE_MODELS.forEach { model ->
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(
+                                            "◈ $model",
+                                            fontSize      = 10.sp,
+                                            color         = if (model == groqModel) AccentOrange else TextPrimary,
+                                            letterSpacing = 1.sp,
+                                            fontFamily    = AppFontFamily
+                                        )
+                                    },
+                                    onClick = {
+                                        modelExpanded = false
+                                        onGroqModelChange(model)
+                                    }
+                                )
+                            }
+                        }
+                    }
+
+                    Spacer(Modifier.height(8.dp))
+
+                    val groqProviderCheck = remember { GroqLlmProvider(context) }
+                    val groqKeyStatus = if (groqProviderCheck.hasApiKey()) "✓ KEY CONFIGURED" else "✗ KEY MISSING"
+                    val groqKeyColor = if (groqProviderCheck.hasApiKey()) NeonGreen else AccentOrange
+                    Text(
+                        groqKeyStatus,
+                        fontSize      = 8.sp,
+                        color         = groqKeyColor.copy(0.7f),
+                        letterSpacing = 1.sp,
+                        fontFamily    = AppFontFamily
+                    )
+                }
+
                 if (isServiceRunning && currentMode == AxonMode.LOCAL) {
                     Spacer(Modifier.height(6.dp))
                     Text(
@@ -2203,7 +2565,7 @@ fun SettingsScreen(
                     }
 
                     Spacer(Modifier.height(4.dp))
-                    Text("// Voice: اكتب الـ ID الكامل زي aura-2-odysseus-en (default) أو اسم قصير زي odysseus", fontSize = 7.sp, color = TextMuted.copy(0.5f),
+                    Text("// Voice: enter the full ID like aura-2-odysseus-en (default) or a short name like odysseus", fontSize = 7.sp, color = TextMuted.copy(0.5f),
                         fontFamily = AppFontFamily)
                 }
 

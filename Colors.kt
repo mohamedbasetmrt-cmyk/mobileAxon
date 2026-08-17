@@ -25,5 +25,9 @@ val NeonCyan = Color(0xFFFEFCFF)
 val AccentPink  = Color(0xFFE53935)
 val AccentAmber = Color(0xFFFFC107)
 
+// ── Provider Accents ─────────────────────────
+val AccentViolet = Color(0xFF9C27B0)
+val AccentOrange = Color(0xFFFF6D00)
+
 // ── Typography ───────────────────────────────
 val AppFontFamily = FontFamily.Default

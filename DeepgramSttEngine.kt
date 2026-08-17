@@ -45,8 +45,10 @@ class DeepgramSttEngine(
     private var audioRecord:   AudioRecord? = null
     private var captureThread: Thread?      = null
 
-    @Volatile private var latestPartialText = ""
-    @Volatile private var finalTextReceived = ""
+    @Volatile private var utteranceAccum = ""     // الأجزاء المتأكد منها (is_final) في الجملة الحالية
+    @Volatile private var currentInterim = ""     // آخر نص مؤقت (interim) للجملة الحالية
+    @Volatile private var sessionFinalText = ""   // كل الجمل المكتملة في السيشن - لـ getFinalText() بس
+    @Volatile private var utteranceFinalized = false
 
     private val httpClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
@@ -59,12 +61,13 @@ class DeepgramSttEngine(
     fun start() {
         if (isRunning.getAndSet(true)) return
         isClosed.set(false)
-        finalTextReceived = ""
-        latestPartialText = ""
+        utteranceAccum = ""
+        currentInterim = ""
+        sessionFinalText = ""
+        utteranceFinalized = false
         Log.i(TAG, "start() -> opening Deepgram WS")
         openWebSocket()
     }
-
     fun stop() {
         if (!isRunning.getAndSet(false)) return
         Log.i(TAG, "stop() -> sending CloseStream to Deepgram")
@@ -85,12 +88,17 @@ class DeepgramSttEngine(
     }
 
     fun getFinalText(): String {
-        return finalTextReceived.ifBlank { latestPartialText }
+        val pending = liveUtteranceText()
+        return if (pending.isBlank()) sessionFinalText
+        else if (sessionFinalText.isBlank()) pending
+        else "$sessionFinalText $pending"
     }
 
     fun reset() {
-        latestPartialText = ""
-        finalTextReceived = ""
+        utteranceAccum = ""
+        currentInterim = ""
+        sessionFinalText = ""
+        utteranceFinalized = false
         isClosed.set(false)
         Log.d(TAG, "reset()")
     }
@@ -113,7 +121,7 @@ class DeepgramSttEngine(
             append("&interim_results=true")
             append("&smart_format=true")
             append("&endpointing=false")
-            append("&utterance_end_ms=1000")
+            append("&utterance_end_ms=1250")
         }
 
         Log.d(TAG, "WS -> $url")
@@ -171,6 +179,20 @@ class DeepgramSttEngine(
             }
         })
     }
+    private fun liveUtteranceText(): String =
+        if (utteranceAccum.isBlank()) currentInterim
+        else if (currentInterim.isBlank()) utteranceAccum
+        else "$utteranceAccum $currentInterim"
+
+    private fun commitUtterance() {
+        val full = liveUtteranceText()
+        if (full.isBlank()) return
+        utteranceFinalized = true
+        sessionFinalText = if (sessionFinalText.isBlank()) full else "$sessionFinalText $full"
+        utteranceAccum = ""
+        currentInterim = ""
+        onFinal(full) // نص الجملة الكاملة، مرة واحدة بس - زي الأصل بالظبط بالنسبة لـ LocalVoiceSession
+    }
 
     private fun handleDeepgramMessage(raw: String) {
         try {
@@ -190,18 +212,20 @@ class DeepgramSttEngine(
                     when {
                         speechFinal -> {
                             Log.i(TAG, "speech_final: $transcript")
-                            finalTextReceived = transcript
-                            onFinal(transcript)
+                            utteranceAccum = if (utteranceAccum.isBlank()) transcript else "$utteranceAccum $transcript"
+                            currentInterim = ""
+                            commitUtterance()
                         }
                         isFinal -> {
-                            Log.d(TAG, "is_final: $transcript")
-                            latestPartialText = transcript
-                            onPartial(transcript)
+                            Log.d(TAG, "is_final segment: $transcript")
+                            utteranceAccum = if (utteranceAccum.isBlank()) transcript else "$utteranceAccum $transcript"
+                            currentInterim = ""
+                            onPartial(liveUtteranceText())
                         }
                         else -> {
                             Log.v(TAG, "interim: $transcript")
-                            latestPartialText = transcript
-                            onPartial(transcript)
+                            currentInterim = transcript
+                            onPartial(liveUtteranceText())
                         }
                     }
                 }
@@ -212,13 +236,13 @@ class DeepgramSttEngine(
 
                 "SpeechStarted" -> {
                     Log.d(TAG, "Deepgram: SpeechStarted")
+                    utteranceFinalized = false
                 }
 
                 "UtteranceEnd" -> {
                     Log.d(TAG, "Deepgram: UtteranceEnd")
-                    if (finalTextReceived.isBlank() && latestPartialText.isNotBlank()) {
-                        finalTextReceived = latestPartialText
-                        onFinal(latestPartialText)
+                    if (!utteranceFinalized) {
+                        commitUtterance()
                     }
                 }
 

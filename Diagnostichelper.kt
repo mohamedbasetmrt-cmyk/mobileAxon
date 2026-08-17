@@ -44,7 +44,7 @@ object DiagnosticHelper {
                 Log.d(TAG, "وجد الملف: $onnxModel ($fileSize bytes)")
 
                 if (fileSize < 1024) {
-                    result.errors.add("حجم الملف صغير جداً (${fileSize} bytes)")
+                    result.errors.add("Model file is too small (${fileSize} bytes)")
                 }
 
                 try {
@@ -56,21 +56,21 @@ object DiagnosticHelper {
                         Log.d(TAG, "تم نسخ الملف بنجاح للاختبار")
                         testFile.delete()
                     } else {
-                        result.errors.add("فشل نسخ الملف")
+                        result.errors.add("Failed to copy model file")
                     }
                 } catch (e: Exception) {
-                    result.errors.add("خطأ في قراءة الملف: ${e.message}")
+                    result.errors.add("Error reading model file: ${e.message}")
                 }
 
             } else {
                 result.modelFileExists = false
-                result.errors.add("ملف .onnx غير موجود في assets")
+                result.errors.add("No .onnx model file found in assets")
                 Log.e(TAG, "ضع الملف في: app/src/main/assets/ak_son.onnx")
             }
 
         } catch (e: Exception) {
             result.modelFileExists = false
-            result.errors.add("خطأ في فحص assets: ${e.message}")
+            result.errors.add("Error checking assets: ${e.message}")
         }
     }
 
@@ -86,7 +86,7 @@ object DiagnosticHelper {
         if (recordAudio) {
             Log.d(TAG, "إذن RECORD_AUDIO ممنوح")
         } else {
-            result.errors.add("إذن RECORD_AUDIO غير ممنوح")
+            result.errors.add("RECORD_AUDIO permission not granted")
             Log.e(TAG, "إذن RECORD_AUDIO غير ممنوح!")
         }
     }
@@ -104,12 +104,12 @@ object DiagnosticHelper {
             if (minBuf > 0) {
                 Log.d(TAG, "الميكروفون يعمل (buffer size=$minBuf)")
             } else {
-                result.errors.add("الميكروفون غير متاح")
+                result.errors.add("Microphone not available")
                 Log.e(TAG, "الميكروفون غير متاح!")
             }
         } catch (e: Exception) {
             result.audioHardwareAvailable = false
-            result.errors.add("خطأ في فحص الميكروفون: ${e.message}")
+            result.errors.add("Error checking microphone: ${e.message}")
         }
     }
 

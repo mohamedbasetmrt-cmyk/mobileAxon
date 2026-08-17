@@ -1,6 +1,8 @@
 package com.example.app_abdelbaset
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.util.Log
 import kotlinx.coroutines.*
 import org.json.JSONObject
@@ -13,29 +15,34 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-class CohereLlmProvider(private val context: Context) : LlmProvider {
+enum class MistralAbility(val toolType: String) {
+    WEB_SEARCH("web_search"),
+    IMAGE_GENERATION("image_generation"),
+    CODE_INTERPRETER("code_interpreter")
+}
+
+class MistralLlmProvider(private val context: Context) : LlmProvider {
 
     companion object {
-        private const val TAG = "CohereProvider"
-        private const val PREF_COHERE_API_KEY = "cohere_api_key"
-        private const val PREF_COHERE_MODEL = "cohere_model"
-        private const val DEFAULT_MODEL = "command-a-plus-05-2026"
+        private const val TAG = "MistralProvider"
+        private const val PREF_MISTRAL_API_KEY = "mistral_api_key"
+        private const val PREF_MISTRAL_MODEL = "mistral_model"
+        private const val DEFAULT_MODEL = "mistral-medium-3-5"
+        private const val API_BASE = "https://api.mistral.ai/v1/chat/completions"
+        private const val CONVERSATION_API_BASE = "https://api.mistral.ai/v1/conversations"
 
         val AVAILABLE_MODELS = listOf(
-            "command-a-plus-05-2026",
-            "command-a-vision-07-2025",
-            "command-r-plus-08-2024",
-            "command-r-08-2024",
-            "command-light"
+            "mistral-medium-3-5",
+            "mistral-small-2603",
+            "mistral-large-2512",
         )
 
         private val VISION_CAPABLE_MODELS = setOf(
-            "command-a-plus-05-2026",
-            "command-a-vision-07-2025"
+            "mistral-large-2512"
         )
 
         // ═══════════════════════════════════════════════════════════════
-        //  TOOL 1: device_action  (تنفيذ أكشن على الموبايل)
+        //  TOOL 1: device_action
         // ═══════════════════════════════════════════════════════════════
         private val DEVICE_ACTION_TOOL = JSONObject().apply {
             put("type", "function")
@@ -64,7 +71,7 @@ class CohereLlmProvider(private val context: Context) : LlmProvider {
         }
 
         // ═══════════════════════════════════════════════════════════════
-        //  TOOL 2: knowledge_search  (بحث فى قاعدة المعرفة)
+        //  TOOL 2: knowledge_search
         // ═══════════════════════════════════════════════════════════════
         private val KNOWLEDGE_SEARCH_TOOL = JSONObject().apply {
             put("type", "function")
@@ -89,7 +96,6 @@ class CohereLlmProvider(private val context: Context) : LlmProvider {
             })
         }
 
-        // ⚠️ Must exactly match the `when(action)` cases in MobileActionExecutor.execute()
         private val KNOWN_ACTIONS = setOf(
             "call", "answer_call", "end_call", "set_alarm", "set_timer", "open_app", "open_url",
             "screen_lock", "screenshot", "volume_up", "volume_down", "volume_set",
@@ -146,6 +152,7 @@ class CohereLlmProvider(private val context: Context) : LlmProvider {
             append("## RESPONSE LENGTH\n")
             append("- Simple replies (confirmations, casual chat, quick answers) → AT MOST one short line.\n")
             append("- Longer replies are fine ONLY when truly needed (explanations, steps, details the user asked for).\n\n")
+
             append("## VOICE-FRIENDLY PHRASING\n")
             append("- Your text is converted to speech, so write in short, complete sentences with clear endings (period, question mark, exclamation mark).\n")
             append("- AVOID long comma-chained sentences (e.g. 'I did X, then Y, then Z'). Instead break them into separate short sentences: 'I did X. Then Y. Then Z.'\n")
@@ -192,7 +199,7 @@ class CohereLlmProvider(private val context: Context) : LlmProvider {
         }
     }
 
-    // ── Data classes for tool-call tracking ──
+    // ── Data classes ──
     private data class ToolCallInfo(
         val id: String,
         val name: String,
@@ -216,6 +223,31 @@ class CohereLlmProvider(private val context: Context) : LlmProvider {
             .build()
     }
 
+    private val conversationHttpClient by lazy {
+        okhttp3.OkHttpClient.Builder()
+            .connectTimeout(15, TimeUnit.SECONDS)
+            .readTimeout(120, TimeUnit.SECONDS)
+            .writeTimeout(60, TimeUnit.SECONDS)
+            .build()
+    }
+
+    private val activeAbilities = mutableSetOf<MistralAbility>()
+
+    fun setAbilities(abilities: Set<MistralAbility>) {
+        synchronized(activeAbilities) {
+            activeAbilities.clear()
+            activeAbilities.addAll(abilities)
+        }
+    }
+
+    fun getActiveAbilities(): Set<MistralAbility> {
+        val snapshot: Set<MistralAbility>
+        synchronized(activeAbilities) {
+            snapshot = activeAbilities.toSet()
+        }
+        return snapshot
+    }
+
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var _isReady = false
     private var currentJob: Job? = null
@@ -233,20 +265,23 @@ class CohereLlmProvider(private val context: Context) : LlmProvider {
     override val isReady: Boolean get() = _isReady
 
     val apiKey: String?
-        get() = prefs.getString(PREF_COHERE_API_KEY, null)?.takeIf { it.isNotBlank() }
+        get() = prefs.getString(PREF_MISTRAL_API_KEY, null)?.takeIf { it.isNotBlank() }
 
     val currentModel: String
-        get() = prefs.getString(PREF_COHERE_MODEL, DEFAULT_MODEL) ?: DEFAULT_MODEL
+        get() = prefs.getString(PREF_MISTRAL_MODEL, DEFAULT_MODEL) ?: DEFAULT_MODEL
+
+    // ── مؤقت: بيمسك موديل الـ vision اللي بيتبدل له بس للطلب اللي فيه صورة ──
+    @Volatile private var temporaryModelOverride: String? = null
 
     fun hasApiKey(): Boolean = !apiKey.isNullOrBlank()
 
     override fun connect(onConnected: () -> Unit) {
         _isReady = hasApiKey()
         if (_isReady) {
-            Log.d(TAG, "Cohere provider ready (model: $currentModel)")
+            Log.d(TAG, "Mistral provider ready (model: $currentModel)")
             onConnected()
         } else {
-            Log.w(TAG, "Cohere API key not set")
+            Log.w(TAG, "Mistral API key not set")
         }
     }
 
@@ -287,27 +322,25 @@ class CohereLlmProvider(private val context: Context) : LlmProvider {
     }
 
     // ═══════════════════════════════════════════════════════════════
-    //  HELPER: Stream a single Cohere chat request
-    //  Returns text + collected tool calls (or error)
+    //  HELPER: Stream a single Mistral (OpenAI-compatible) chat request
     // ═══════════════════════════════════════════════════════════════
-    private suspend fun streamCohereRequest(
+    private suspend fun streamMistralRequest(
         messagesArray: JSONArray,
         key: String,
         requestId: Int,
         onChunk: (String) -> Unit
     ): StreamResult {
         val bodyString = JSONObject().apply {
-            put("model", currentModel)
+            put("model", temporaryModelOverride ?: currentModel)
             put("messages", messagesArray)
             put("tools", JSONArray().put(DEVICE_ACTION_TOOL).put(KNOWLEDGE_SEARCH_TOOL))
-            put("strict_tools", true)
             put("stream", true)
         }.toString()
 
         val requestBody = bodyString.toRequestBody("application/json".toMediaType())
 
         val request = okhttp3.Request.Builder()
-            .url("https://api.cohere.com/v2/chat")
+            .url(API_BASE)
             .addHeader("Authorization", "Bearer $key")
             .addHeader("Accept", "text/event-stream")
             .post(requestBody)
@@ -317,15 +350,16 @@ class CohereLlmProvider(private val context: Context) : LlmProvider {
 
         if (!response.isSuccessful) {
             val errBody = response.body?.string() ?: "unknown error"
-            return StreamResult(StringBuilder(), emptyList(), "Cohere HTTP ${response.code}: $errBody")
+            return StreamResult(StringBuilder(), emptyList(), "Mistral HTTP ${response.code}: $errBody")
         }
 
         val fullResponse = StringBuilder()
-        val collectedToolCalls = mutableListOf<ToolCallInfo>()
-        val contentTypes = mutableMapOf<Int, String>()
-        var currentToolId = ""
-        var currentToolName = ""
-        val currentToolArgs = StringBuilder()
+
+        // OpenAI streaming: accumulate tool calls across chunks by index
+        val toolCallIds    = mutableMapOf<Int, String>()
+        val toolCallNames  = mutableMapOf<Int, String>()
+        val toolCallArgsBuilders = mutableMapOf<Int, StringBuilder>()
+        var finishReasonSeen = false
 
         val source = response.body?.source()
             ?: return StreamResult(StringBuilder(), emptyList(), "Empty response body")
@@ -340,80 +374,304 @@ class CohereLlmProvider(private val context: Context) : LlmProvider {
                     if (data == "[DONE]" || data.isEmpty()) return@forEach
                     try {
                         val obj = JSONObject(data)
-                        Log.d(TAG, "RAW: $data")
-                        val message = obj.optJSONObject("delta")?.optJSONObject("message")
 
-                        when (obj.optString("type")) {
-                            "content-start" -> {
-                                val idx = obj.optInt("index", 0)
-                                val type = message?.optJSONObject("content")?.optString("type", "text") ?: "text"
-                                contentTypes[idx] = type
-                            }
-                            "content-delta" -> {
-                                val idx = obj.optInt("index", 0)
-                                if (contentTypes[idx] != "thinking") {
-                                    val text = message?.optJSONObject("content")?.optString("text", "") ?: ""
-                                    if (text.isNotEmpty()) {
-                                        fullResponse.append(text)
-                                        withContext(Dispatchers.Main) { onChunk(text) }
-                                    }
+                        val choices = obj.optJSONArray("choices")
+                        if (choices == null || choices.length() == 0) return@forEach
+
+                        val choice = choices.optJSONObject(0) ?: return@forEach
+                        val delta  = choice.optJSONObject("delta") ?: return@forEach
+
+                        // ── Tool calls ──
+                        val toolCalls = delta.optJSONArray("tool_calls")
+                        if (toolCalls != null && toolCalls.length() > 0) {
+                            for (i in 0 until toolCalls.length()) {
+                                val tc = toolCalls.optJSONObject(i) ?: continue
+                                val idx = tc.optInt("index", 0)
+                                val fn  = tc.optJSONObject("function") ?: continue
+
+                                val id = tc.optString("id", "")
+                                if (id.isNotEmpty()) {
+                                    toolCallIds[idx] = id
                                 }
-                            }
-                            "tool-call-start" -> {
-                                val toolCall = firstToolCall(message)
-                                currentToolId = toolCall?.optString("id", "") ?: ""
-                                currentToolName = toolCall?.optJSONObject("function")?.optString("name", "") ?: ""
-                                currentToolArgs.clear()
-                                val initialArgs = toolCall?.optJSONObject("function")?.optString("arguments", "") ?: ""
-                                if (initialArgs.isNotEmpty()) currentToolArgs.append(initialArgs)
-                            }
-                            "tool-call-delta" -> {
-                                val argsChunk = firstToolCall(message)
-                                    ?.optJSONObject("function")?.optString("arguments", "") ?: ""
-                                currentToolArgs.append(argsChunk)
-                            }
-                            "tool-call-end" -> {
-                                if (currentToolName.isNotBlank()) {
-                                    val id = currentToolId.ifBlank { "tool_call_${collectedToolCalls.size}" }
-                                    collectedToolCalls.add(
-                                        ToolCallInfo(id, currentToolName, currentToolArgs.toString())
-                                    )
+
+                                val name = fn.optString("name", "")
+                                if (name.isNotEmpty()) {
+                                    toolCallNames[idx] = name
                                 }
-                                currentToolId = ""
-                                currentToolName = ""
-                                currentToolArgs.clear()
-                            }
-                            "message-end" -> {
-                                val finishReason = obj.optJSONObject("delta")?.optString("finish_reason", "")
-                                if (finishReason == "ERROR") {
-                                    val errMsg = obj.optJSONObject("delta")?.optString("error", "Unknown Cohere error")
-                                    Log.e(TAG, "Cohere message-end error: $errMsg")
+
+                                val args = fn.optString("arguments", "")
+                                if (args.isNotEmpty()) {
+                                    val builder = toolCallArgsBuilders.getOrPut(idx) { StringBuilder() }
+                                    builder.append(args)
                                 }
                             }
                         }
+
+                        // ── Text content ──
+                        val content = delta.optString("content", "")
+                        if (content.isNotEmpty()) {
+                            fullResponse.append(content)
+                            withContext(Dispatchers.Main) { onChunk(content) }
+                        }
+
+                        // ── Finish reason ──
+                        val finishReason = choice.optString("finish_reason", "")
+                        if (finishReason.isNotEmpty()) {
+                            finishReasonSeen = true
+                        }
+
                     } catch (_: Exception) {}
                 }
             }
         }
 
-        return StreamResult(fullResponse, collectedToolCalls, null)
+        // ── Finalize tool calls ──
+        val collectedToolCalls = mutableListOf<ToolCallInfo>()
+        for ((idx, builder) in toolCallArgsBuilders) {
+            val name = toolCallNames[idx] ?: ""
+            val id   = toolCallIds[idx] ?: "call_$idx"
+            if (name.isNotBlank()) {
+                collectedToolCalls.add(ToolCallInfo(id, name, builder.toString()))
+            }
+        }
+
+return StreamResult(fullResponse, collectedToolCalls, null)
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  CONVERSATIONS ENDPOINT (abilities: web_search / image_generation / code_interpreter)
+    //  ═══════════════════════════════════════════════════════════════
+    private suspend fun runConversationRequest(
+        systemPrompt: String,
+        key: String,
+        requestId: Int,
+        userMsgIndex: Int,
+        userText: String,
+        onChunk: (String) -> Unit,
+        onDone: () -> Unit,
+        onError: (String) -> Unit,
+        onImage: (Bitmap) -> Unit,
+        onReferences: (List<AiReference>) -> Unit
+    ) {
+        val inputs = JSONArray()
+        for (msg in messageHistory) {
+            if (msg.text.isBlank()) continue
+            inputs.put(JSONObject().apply {
+                put("role", if (msg.role == "user") "user" else "assistant")
+                put("content", msg.text)
+            })
+        }
+
+        val tools = JSONArray()
+        getActiveAbilities().forEach { ab ->
+            tools.put(JSONObject().apply { put("type", ab.toolType) })
+        }
+
+        val bodyString = JSONObject().apply {
+            put("model", temporaryModelOverride ?: currentModel)
+            put("inputs", inputs)
+            put("tools", tools)
+            put("completion_args", JSONObject().apply {
+                put("temperature", 0.7)
+                put("max_tokens", 2048)
+                put("top_p", 1)
+            })
+            put("instructions", systemPrompt)
+        }.toString()
+
+        val requestBody = bodyString.toRequestBody("application/json".toMediaType())
+        val request = okhttp3.Request.Builder()
+            .url(CONVERSATION_API_BASE)
+            .addHeader("Authorization", "Bearer $key")
+            .addHeader("Accept", "application/json")
+            .post(requestBody)
+            .build()
+
+        val response = try {
+            conversationHttpClient.newCall(request).execute()
+        } catch (e: Exception) {
+            Log.e(TAG, "Conversation request failed", e)
+            discardUserMessage(userMsgIndex, userText)
+            withContext(Dispatchers.Main) { onError("Mistral error: ${e.message}") }
+            return
+        }
+
+        if (!response.isSuccessful) {
+            val errBody = response.body?.string() ?: "unknown error"
+            Log.e(TAG, "Conversation HTTP ${response.code}: $errBody")
+            discardUserMessage(userMsgIndex, userText)
+            withContext(Dispatchers.Main) { onError("Mistral HTTP ${response.code}: $errBody") }
+            return
+        }
+
+        val responseText = response.body?.string() ?: ""
+        if (requestId <= lastCancelledRequestId) {
+            discardUserMessage(userMsgIndex, userText)
+            return
+        }
+
+        val responseJson = try { JSONObject(responseText) } catch (e: Exception) { null }
+        if (responseJson == null) {
+            Log.e(TAG, "Invalid conversation response: $responseText")
+            discardUserMessage(userMsgIndex, userText)
+            withContext(Dispatchers.Main) { onError("Mistral: invalid response") }
+            return
+        }
+
+        val apiError = responseJson.optJSONObject("error")
+        if (apiError != null) {
+            val errMsg = apiError.optString("message", responseJson.optString("error", "Mistral API error"))
+            Log.e(TAG, "Conversation API error: $errMsg")
+            discardUserMessage(userMsgIndex, userText)
+            withContext(Dispatchers.Main) { onError(errMsg) }
+            return
+        }
+
+        // ── Parse outputs ──
+        val textBuilder = StringBuilder()
+        val imageUrls = mutableListOf<String>()
+        val refs = LinkedHashMap<String, AiReference>()
+
+        val outputs = responseJson.optJSONArray("outputs")
+        if (outputs != null) {
+            for (i in 0 until outputs.length()) {
+                val entry = outputs.optJSONObject(i) ?: continue
+                when (entry.optString("type")) {
+                    "tool.execution" -> when (entry.optString("name")) {
+                        "image_generation" -> {
+                            val result = entry.optJSONObject("info")?.optString("result", "")
+                            if (!result.isNullOrBlank()) {
+                                try {
+                                    val url = JSONObject(result).optString("url", "")
+                                    if (url.isNotBlank()) imageUrls.add(url)
+                                } catch (_: Exception) {}
+                            }
+                        }
+                        "web_search" -> {
+                            val result = entry.optJSONObject("info")?.optString("result", "")
+                            if (!result.isNullOrBlank()) {
+                                try {
+                                    val obj = JSONObject(result)
+                                    val keys = obj.keys()
+                                    while (keys.hasNext()) {
+                                        val r = obj.optJSONObject(keys.next()) ?: continue
+                                        val url = r.optString("url", "")
+                                        if (url.isBlank()) continue
+                                        refs[url] = AiReference(
+                                            title = r.optString("title", url),
+                                            url = url,
+                                            description = r.optString("description", "")
+                                        )
+                                    }
+                                } catch (_: Exception) {}
+                            }
+                        }
+                    }
+                    "message.output" -> {
+                        when (val content = entry.opt("content")) {
+                            is JSONArray -> {
+                                for (j in 0 until content.length()) {
+                                    val part = content.optJSONObject(j) ?: continue
+                                    when (part.optString("type")) {
+                                        "text" -> textBuilder.append(part.optString("text", ""))
+                                        "tool_reference" -> {
+                                            val url = part.optString("url", "")
+                                            if (url.isBlank()) continue
+                                            refs[url] = AiReference(
+                                                title = part.optString("title", url),
+                                                url = url,
+                                                description = part.optString("description", "")
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                            is String -> textBuilder.append(content)
+                            is JSONObject -> when (content.optString("type")) {
+                                "text" -> textBuilder.append(content.optString("text", ""))
+                                "tool_reference" -> {
+                                    val url = content.optString("url", "")
+                                    if (url.isNotBlank()) refs[url] = AiReference(
+                                        title = content.optString("title", url),
+                                        url = url,
+                                        description = content.optString("description", "")
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        val cleanText = textBuilder.toString().replace(
+            Regex(" thinking.*? response\\s*", RegexOption.DOT_MATCHES_ALL),
+            ""
+        ).trim()
+
+        if (cleanText.isNotBlank()) {
+            messageHistory.add(HistoryMessage("assistant", cleanText))
+            trimHistory()
+        }
+
+        val refList = refs.values.toList()
+        var imageBitmap: Bitmap? = null
+        if (imageUrls.isNotEmpty()) {
+            Log.d(TAG, "Downloading generated image: ${imageUrls.first().take(80)}")
+            imageBitmap = downloadImage(imageUrls.first())
+        }
+
+        if (cleanText.isEmpty() && imageBitmap == null && refList.isEmpty()) {
+            withContext(Dispatchers.Main) { onError("No response from Mistral") }
+            return
+        }
+
+        withContext(Dispatchers.Main) {
+            if (cleanText.isNotEmpty()) onChunk(cleanText)
+            imageBitmap?.let { onImage(it) }
+            if (refList.isNotEmpty()) onReferences(refList)
+            onDone()
+        }
+    }
+
+    private fun downloadImage(url: String): Bitmap? {
+        return try {
+            val req = okhttp3.Request.Builder().url(url).get().build()
+            conversationHttpClient.newCall(req).execute().use { resp ->
+                if (resp.isSuccessful) {
+                    resp.body?.byteStream()?.let { BitmapFactory.decodeStream(it) }
+                } else null
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Image download failed: ${e.message}")
+            null
+        }
+    }
+
+    private fun discardUserMessage(userMsgIndex: Int, userText: String) {
+        if (userMsgIndex in messageHistory.indices &&
+            messageHistory[userMsgIndex].role == "user" &&
+            messageHistory[userMsgIndex].text == userText
+        ) {
+            messageHistory.removeAt(userMsgIndex)
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════
     //  MAIN: sendMessage with knowledge_search follow-up support
-    // ═══════════════════════════════════════════════════════════════
+    //  ═══════════════════════════════════════════════════════════════
     override fun sendMessage(
         json:     String,
         onChunk:  (String) -> Unit,
         onDone:   () -> Unit,
         onError:  (String) -> Unit,
         onAction: (List<JSONObject>) -> Unit,
-        onImage:  (android.graphics.Bitmap) -> Unit,
+        onImage:  (Bitmap) -> Unit,
         onReferences: (List<AiReference>) -> Unit
     ) {
         val key = apiKey
         if (key.isNullOrBlank()) {
-            onError("Cohere API key not set. Go to Settings > Local Models > Cohere API Key")
+            onError("Mistral API key not set. Go to Settings > Local Models > Mistral API Key")
             return
         }
 
@@ -426,12 +684,20 @@ class CohereLlmProvider(private val context: Context) : LlmProvider {
 
         if (userText.isBlank() && imageB64 == null) { onError("Empty message"); return }
 
+        temporaryModelOverride = null   // reset أي override من طلب سابق — التطبيق على الموديل الأصلي
+
         if (imageB64 != null && currentModel !in VISION_CAPABLE_MODELS) {
-            onError(
-                "The current model ($currentModel) does not support images. " +
-                        "Go to Settings > Local Models > Cohere and choose a vision-capable model like command-a-vision-07-2025."
-            )
-            return
+            // ── Auto-switch: نستخدم موديل بياخد صور للطلب ده بس، وبعدين نرجع للموديل الأصلي ──
+            val visionModel = AVAILABLE_MODELS.firstOrNull { it in VISION_CAPABLE_MODELS }
+            if (visionModel != null) {
+                temporaryModelOverride = visionModel
+                Log.d(TAG, "Temporarily switching to vision model for image request: $currentModel -> $visionModel")
+            } else {
+                onError(
+                    "The current model ($currentModel) does not support images and no vision-capable model is available."
+                )
+                return
+            }
         }
 
         val imageDataUrl = imageB64?.let { "data:$mediaType;base64,$it" }
@@ -461,7 +727,6 @@ class CohereLlmProvider(private val context: Context) : LlmProvider {
         val myRequestId = ++currentRequestId
         currentJob = scope.launch {
             try {
-                // Include the context augmentation in the system prompt
                 val currentDateTime = SimpleDateFormat(
                     "yyyy-MM-dd HH:mm:ss",
                     Locale.getDefault()
@@ -484,13 +749,30 @@ class CohereLlmProvider(private val context: Context) : LlmProvider {
                     userPrompt = messageHistory.joinToString("\n") { "${if (it.role == "user") "User" else "Assistant"}: ${it.text}" }
                 )
 
+                // ── Ability mode: use the conversations endpoint with the selected tools ──
+                if (getActiveAbilities().isNotEmpty() && imageDataUrl == null) {
+                    runConversationRequest(
+                        systemPrompt = systemPrompt,
+                        key          = key,
+                        requestId    = myRequestId,
+                        userMsgIndex = userMsgIndex,
+                        userText     = userText,
+                        onChunk      = onChunk,
+                        onDone       = onDone,
+                        onError      = onError,
+                        onImage      = onImage,
+                        onReferences = onReferences
+                    )
+                    return@launch
+                }
+
                 val messagesArray = buildMessagesArray(systemPrompt)
 
                 val allTextBuilder = StringBuilder()
                 val allToolCalls = mutableListOf<ToolCallInfo>()
 
-                // ── Turn 1: Initial request ──
-                var currentResult = streamCohereRequest(messagesArray, key, myRequestId, onChunk)
+                // ── Turn 1 ──
+                var currentResult = streamMistralRequest(messagesArray, key, myRequestId, onChunk)
                 if (currentResult.error != null) {
                     withContext(Dispatchers.Main) { onError(currentResult.error) }
                     return@launch
@@ -500,9 +782,8 @@ class CohereLlmProvider(private val context: Context) : LlmProvider {
                 allToolCalls.addAll(currentResult.toolCalls)
 
                 var searchRounds = 0
-                val MAX_SEARCH_ROUNDS = 3  // أقصى عدد لمرات البحث المتكرر
+                val MAX_SEARCH_ROUNDS = 3
 
-                // ── Loop for multiple search rounds if the model isn't satisfied ──
                 while (searchRounds < MAX_SEARCH_ROUNDS) {
                     val knowledgeSearchCalls = currentResult.toolCalls.filter { it.name == "knowledge_search" }
                     if (knowledgeSearchCalls.isEmpty()) break
@@ -510,7 +791,11 @@ class CohereLlmProvider(private val context: Context) : LlmProvider {
                     val allCallsFromCurrentTurn = currentResult.toolCalls
                     messagesArray.put(JSONObject().apply {
                         put("role", "assistant")
-                        if (currentResult.text.isNotEmpty()) put("content", currentResult.text.toString())
+                        if (currentResult.text.isNotEmpty()) {
+                            put("content", currentResult.text.toString())
+                        } else {
+                            put("content", JSONObject.NULL)
+                        }
                         put("tool_calls", JSONArray().apply {
                             for (tc in allCallsFromCurrentTurn) {
                                 put(JSONObject().apply {
@@ -541,18 +826,13 @@ class CohereLlmProvider(private val context: Context) : LlmProvider {
                         messagesArray.put(JSONObject().apply {
                             put("role", "tool")
                             put("tool_call_id", tc.id)
-                            put("content", JSONObject().apply {
-                                put("type", "document")
-                                put("document", JSONObject().apply {
-                                    put("data", toolContent)
-                                })
-                            })
+                            put("content", toolContent)
                         })
                     }
 
                     searchRounds++
                     Log.d(TAG, "Sending follow-up request (round $searchRounds)")
-                    currentResult = streamCohereRequest(messagesArray, key, myRequestId, onChunk)
+                    currentResult = streamMistralRequest(messagesArray, key, myRequestId, onChunk)
                     if (currentResult.error != null) {
                         withContext(Dispatchers.Main) { onError(currentResult.error) }
                         return@launch
@@ -562,20 +842,7 @@ class CohereLlmProvider(private val context: Context) : LlmProvider {
                     allToolCalls.addAll(currentResult.toolCalls)
                 }
 
-                if (myRequestId <= lastCancelledRequestId) {
-                    if (userMsgIndex in messageHistory.indices &&
-                        messageHistory[userMsgIndex].role == "user" &&
-                        messageHistory[userMsgIndex].text == userText
-                    ) {
-                        messageHistory.removeAt(userMsgIndex)
-                    }
-                    Log.d(TAG, "Request $myRequestId cancelled by barge-in — discarding partial history")
-                    return@launch
-                }
-
-                var hasContent = allTextBuilder.toString().isNotBlank()
-
-                // ── Process ALL device_action calls (from all turns) ──
+                // ── Process ALL device_action calls ──
                 val collectedActions = mutableListOf<JSONObject>()
                 for (tc in allToolCalls.filter { it.name == "device_action" }) {
                     try {
@@ -598,7 +865,25 @@ class CohereLlmProvider(private val context: Context) : LlmProvider {
                     }
                 }
 
-                val assistantText = allTextBuilder.toString().trim()
+                // ── Build final text (strip <think> tags) ──
+                val rawText = allTextBuilder.toString().trim()
+                val cleanText = rawText.replace(
+                    Regex("<think>.*?</think>\\s*", RegexOption.DOT_MATCHES_ALL),
+                    ""
+                ).trim()
+
+                val assistantText = cleanText
+                if (myRequestId <= lastCancelledRequestId) {
+                    if (userMsgIndex in messageHistory.indices &&
+                        messageHistory[userMsgIndex].role == "user" &&
+                        messageHistory[userMsgIndex].text == userText
+                    ) {
+                        messageHistory.removeAt(userMsgIndex)
+                    }
+                    Log.d(TAG, "Request $myRequestId cancelled by barge-in — discarding partial history")
+                    return@launch
+                }
+                var hasContent = assistantText.isNotBlank()
 
                 if (assistantText.isNotEmpty()) {
                     messageHistory.add(HistoryMessage("assistant", assistantText))
@@ -621,20 +906,9 @@ class CohereLlmProvider(private val context: Context) : LlmProvider {
 
                 withContext(Dispatchers.Main) {
                     if (collectedActions.isNotEmpty()) onAction(collectedActions)
-                    if (hasContent || collectedActions.isNotEmpty()) {
-                        onDone()
-                        // ── NEW: Save the conversation session after completion ──
-//                        scope.launch(Dispatchers.IO) {
-//                            val sessionId = "cohere_${System.currentTimeMillis()}"
-//                            val allMessages = messageHistory.map { h ->
-//                                ChatMessage(text = h.text, isUser = h.role == "user")
-//                            }
-//                            ChatSummaryManager.saveSession(allMessages, sessionId)
-//                            Log.d(TAG, "Saved conversation session: $sessionId")
-//                        }
-                    }
+                    if (hasContent || collectedActions.isNotEmpty()) onDone()
                     else if (searchRounds > 0) onError("I searched the knowledge base but couldn't find a complete answer. Please try rephrasing.")
-                    else onError("No response from Cohere")
+                    else onError("No response from Mistral")
                 }
 
             } catch (e: CancellationException) {
@@ -647,8 +921,10 @@ class CohereLlmProvider(private val context: Context) : LlmProvider {
                 }
                 withContext(Dispatchers.Main) { onDone() }
             } catch (e: Exception) {
-                Log.e(TAG, "Cohere stream error", e)
-                withContext(Dispatchers.Main) { onError("Cohere error: ${e.message}") }
+                Log.e(TAG, "Mistral stream error", e)
+                withContext(Dispatchers.Main) { onError("Mistral error: ${e.message}") }
+            } finally {
+                if (myRequestId == currentRequestId) temporaryModelOverride = null
             }
         }
     }
@@ -658,41 +934,32 @@ class CohereLlmProvider(private val context: Context) : LlmProvider {
         currentJob = null
         _isReady = false
         messageHistory.clear()
-        Log.d(TAG, "Cohere provider disconnected")
+        Log.d(TAG, "Mistral provider disconnected")
     }
 
     override fun cancel() {
         lastCancelledRequestId = currentRequestId
         currentJob?.cancel()
         currentJob = null
-        Log.d(TAG, "Cohere request cancelled (barge-in)")
+        Log.d(TAG, "Mistral request cancelled (barge-in)")
     }
-
     fun clearHistory() {
         messageHistory.clear()
         Log.d(TAG, "Conversation history cleared")
     }
 
     fun setApiKey(key: String) {
-        prefs.edit().putString(PREF_COHERE_API_KEY, key.trim()).apply()
+        prefs.edit().putString(PREF_MISTRAL_API_KEY, key.trim()).apply()
         _isReady = key.isNotBlank()
     }
 
     fun setModel(model: String) {
-        prefs.edit().putString(PREF_COHERE_MODEL, model).apply()
+        prefs.edit().putString(PREF_MISTRAL_MODEL, model).apply()
     }
 
     fun clearApiKey() {
-        prefs.edit().remove(PREF_COHERE_API_KEY).apply()
+        prefs.edit().remove(PREF_MISTRAL_API_KEY).apply()
         _isReady = false
-    }
-
-    private fun firstToolCall(message: JSONObject?): JSONObject? {
-        return when (val tc = message?.opt("tool_calls")) {
-            is JSONArray  -> tc.optJSONObject(0)
-            is JSONObject -> tc
-            else          -> null
-        }
     }
 
     private fun trimHistory() {
